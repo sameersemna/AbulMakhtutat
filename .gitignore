@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Pipeline runtime artifacts
+.ocr_cache/
+.ocr_state.json
+output/
+run_summary.json
+
+# OS
+.DS_Store
+input/*
