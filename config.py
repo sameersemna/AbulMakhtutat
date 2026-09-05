@@ -155,6 +155,12 @@ class PipelineConfig:
     font_family: str = os.getenv("OCR_FONT_FAMILY", "'Amiri', 'Traditional Arabic', 'Scheherazade New', serif")
     # Calibre ebook-convert binary (for MOBI). Empty = auto-detect via PATH.
     ebook_convert: str = os.getenv("EBOOK_CONVERT", "")
+    # Searchable PDF overlay: generate `{stem}_overlay.pdf` with the original scan
+    # as the visible image and an invisible OCR text layer on top (render mode 3).
+    # mode: "off" | "page" (full-page text layer) | "word" (word-aligned, future).
+    overlay_mode: str = os.getenv("OVERLAY_MODE", "off")
+    # Arabic font file used for the invisible text layer (must support Arabic).
+    overlay_font: str = os.getenv("OVERLAY_FONT", "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf")
 
 
 @dataclass

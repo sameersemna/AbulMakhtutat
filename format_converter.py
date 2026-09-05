@@ -163,6 +163,106 @@ class FormatConverter:
             logger.error("MOBI generation failed for %s: %s", result.rel_path, exc.stderr)
             return None
 
+    def _write_overlay_pdf(self, result: DocumentResult) -> Path | None:
+        """Generate a searchable PDF: original scan + invisible OCR text layer.
+
+        Renders each source page as a full-page image (the visible layer), then
+        overlays the OCR text as invisible text so the PDF looks identical to
+        the scan but is searchable/copyable.
+
+        Uses `insert_htmlbox` (MuPDF's HTML engine with HarfBuzz shaping) with
+        `opacity: 0` — this is required for Arabic, because `insert_text` /
+        `insert_textbox` do NOT perform Arabic contextual shaping and produce
+        unsearchable `?` glyphs. The HTML path shapes Arabic correctly.
+
+        This is the "page" mode (full-page text block per page). Word-aligned
+        placement requires bounding boxes from the OCR step (future work).
+        """
+        import html as _html
+        import re
+
+        import pymupdf
+
+        mode = self.config.pipeline.overlay_mode
+        if mode == "off":
+            return None
+
+        font_path = self.config.pipeline.overlay_font
+        if not Path(font_path).exists():
+            logger.warning("Overlay font not found at %s; skipping overlay PDF for %s", font_path, result.rel_path)
+            return None
+
+        out_path = result.output_dir / f"{result.source_path.stem}_overlay.pdf"
+        try:
+            src = pymupdf.open(str(result.source_path))
+            out = pymupdf.open()  # new empty PDF
+
+            for page in result.pages:
+                page_num = page.page_number
+                if page_num < 1 or page_num > src.page_count:
+                    continue
+
+                # 1. Render the source page as the visible image layer.
+                src_page = src[page_num - 1]
+                zoom = self.config.pipeline.dpi / 72.0
+                pix = src_page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                img_bytes = pix.tobytes("png")
+
+                # 2. Create a new page with the same dimensions as the source.
+                new_page = out.new_page(width=src_page.rect.width, height=src_page.rect.height)
+                new_page.insert_image(new_page.rect, stream=img_bytes)
+
+                # 3. Overlay invisible OCR text (opacity 0, still searchable).
+                text = page.text.strip()
+                if not text or page.error:
+                    continue
+
+                # Strip Markdown syntax so the searchable layer is clean text.
+                clean = self._strip_markdown(text)
+                if not clean.strip():
+                    continue
+
+                # Escape for HTML and preserve line breaks.
+                escaped = _html.escape(clean).replace("\n", "<br>")
+                html = (
+                    f'<div style="font-family: Noto Naskh Arabic; '
+                    f'font-size: 9px; opacity: 0; direction: rtl; '
+                    f'text-align: right;">{escaped}</div>'
+                )
+                margin = 20
+                rect = pymupdf.Rect(
+                    margin, margin,
+                    new_page.rect.width - margin, new_page.rect.height - margin,
+                )
+                new_page.insert_htmlbox(rect, html)
+
+            out.save(str(out_path))
+            out.close()
+            src.close()
+            return out_path
+        except Exception as exc:
+            logger.error("Overlay PDF generation failed for %s: %s", result.rel_path, exc)
+            return None
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Remove Markdown syntax (headings, lists, quotes, emphasis) for the
+        searchable text layer, leaving clean readable text."""
+        import re
+
+        lines = []
+        for line in text.splitlines():
+            # Strip heading markers (#, ##, ...).
+            line = re.sub(r"^\s{0,3}#{1,6}\s+", "", line)
+            # Strip list markers (-, *, 1.).
+            line = re.sub(r"^\s{0,3}([-*+]|\d+[.)])\s+", "", line)
+            # Strip blockquote markers (>).
+            line = re.sub(r"^\s{0,3}>\s?", "", line)
+            # Strip inline emphasis/strong markers.
+            line = line.replace("**", "").replace("__", "").replace("*", "").replace("`", "")
+            lines.append(line)
+        return "\n".join(lines)
+
     def convert(self, result: DocumentResult, markdown: str) -> dict[str, Path | None]:
         """Generate all output formats. Returns a map of format -> path."""
         outputs: dict[str, Path | None] = {}
@@ -171,4 +271,5 @@ class FormatConverter:
         outputs["epub"] = self._write_epub(result, markdown)
         outputs["pdf"] = self._write_pdf(result, markdown)
         outputs["mobi"] = self._write_mobi(result)
+        outputs["overlay"] = self._write_overlay_pdf(result)
         return outputs
