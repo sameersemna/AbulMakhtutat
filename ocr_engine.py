@@ -18,9 +18,39 @@ import httpx
 from PIL import Image
 
 from config import Config, get_config
-from preprocess import preprocess
+from preprocess import enhance_contrast, preprocess
 
 logger = logging.getLogger(__name__)
+
+# Phrases the vision model emits when it *refuses* to transcribe (instead of
+# returning Arabic text). These are English "I can't read this" responses that
+# must never be stored as valid OCR output.
+_REFUSAL_PHRASES = (
+    "overexposed",
+    "washed out",
+    "nearly illegible",
+    "no clear or readable",
+    "no transcribable",
+    "cannot be discerned",
+    "unreadable",
+    "not legible",
+    "illegible",
+    "no readable text",
+    "no text",
+    "blank page",
+    "empty page",
+    "no arabic",
+    "no visible text",
+    "unable to read",
+    "cannot read",
+    "can't read",
+    "cannot transcribe",
+    "unable to transcribe",
+    "no content",
+    "nothing to transcribe",
+    "if you have a clearer",
+    "provide it for accurate",
+)
 
 _VISION_PROMPT = """You are an expert Arabic OCR engine. Transcribe the Arabic text in this page image EXACTLY as it appears.
 
@@ -129,19 +159,61 @@ class OCREngine:
         return await _call()
 
     async def ocr_page(self, image_bytes: bytes) -> tuple[str, str]:
-        """OCR a single page image. Returns (text, model_used)."""
+        """OCR a single page image. Returns (text, model_used).
+
+        Detects refusal/failure responses (e.g. "image is overexposed") and
+        retries with contrast enhancement, then falls back to the secondary
+        model. Returns ("", "") if all attempts fail, so the failure prose is
+        never stored as valid OCR output.
+        """
         b64 = self._prepare_image(image_bytes)
-        # Try primary vision model, fall back to secondary on failure.
+
+        # Attempt 1: primary model, original image.
         for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
             try:
                 text = await self._generate(model, _VISION_PROMPT, images=[b64])
-                return text, model
+                if not self._is_refusal(text):
+                    return text, model
+                logger.warning("Model %s refused page (unreadable/overexposed); retrying with contrast enhancement", model)
+                break  # move to enhanced-image retry
             except RuntimeError:
                 if model == self.config.ollama.vision_model:
                     logger.warning("Primary vision model failed, trying fallback %s", self.config.ollama.vision_fallback)
                     continue
                 raise
-        raise RuntimeError("No vision model available")
+
+        # Attempt 2: contrast-enhanced image (fixes "washed out" pages).
+        enhanced_b64 = self._prepare_image(enhance_contrast(image_bytes))
+        for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
+            try:
+                text = await self._generate(model, _VISION_PROMPT, images=[enhanced_b64])
+                if not self._is_refusal(text):
+                    logger.info("Recovered page via contrast enhancement using %s", model)
+                    return text, model
+            except RuntimeError:
+                continue
+
+        # All attempts failed — return empty so the caller marks the page as failed.
+        logger.error("All OCR attempts failed for page (refusal persisted)")
+        return "", ""
+
+    def _is_refusal(self, text: str) -> bool:
+        """Return True if the OCR output is a refusal/failure message, not Arabic text."""
+        if not text or not text.strip():
+            return True
+        lowered = text.lower()
+        # If the response contains any refusal phrase, treat it as a failure.
+        if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
+            return True
+        # If there is essentially no Arabic content, treat as failure.
+        arabic_chars = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+        if arabic_chars < 3:
+            return True
+        return False
+
+    def is_refusal(self, text: str) -> bool:
+        """Public wrapper for refusal detection (used by the processor)."""
+        return self._is_refusal(text)
 
     def _prepare_image(self, image_bytes: bytes) -> str:
         """Preprocess (optional) and downscale the page image, then base64-encode."""

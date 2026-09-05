@@ -85,7 +85,11 @@ class PDFProcessor:
         cache_path = self._cache_path(file_hash, page_number)
         if self.config.pipeline.use_cache and cache_path.exists():
             text = cache_path.read_text(encoding="utf-8")
-            return PageResult(page_number=page_number, text=text, model="cache")
+            # If the cached text is a refusal/failure message (from an older run),
+            # discard it and re-OCR so we don't keep the failure prose.
+            if not self.engine.is_refusal(text):
+                return PageResult(page_number=page_number, text=text, model="cache")
+            logger.warning("Cached page %d contains a refusal message; re-OCRing", page_number)
 
         start = time.monotonic()
         try:
@@ -94,7 +98,15 @@ class PDFProcessor:
             raw, model = await self.engine.ocr_page(image_bytes)
             text = await self.engine.postprocess(raw)
             duration_ms = int((time.monotonic() - start) * 1000)
-            result = PageResult(page_number=page_number, text=text, model=model, duration_ms=duration_ms)
+            if not text.strip():
+                # OCR returned empty (all attempts refused) — treat as failure
+                # so it is NOT cached and can be retried on a future run.
+                result = PageResult(
+                    page_number=page_number, text="", model=model,
+                    duration_ms=duration_ms, error="OCR returned no text (all attempts refused)",
+                )
+            else:
+                result = PageResult(page_number=page_number, text=text, model=model, duration_ms=duration_ms)
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
             logger.error("OCR failed for page %d: %s", page_number, exc)

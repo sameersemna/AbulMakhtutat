@@ -135,3 +135,34 @@ def preprocess(image_bytes: bytes, config: Config | None = None) -> bytes:
     except Exception as exc:
         logger.warning("Preprocessing failed, using original image: %s", exc)
         return image_bytes
+
+
+def enhance_contrast(image_bytes: bytes) -> bytes:
+    """Enhance contrast for washed-out / overexposed scans.
+
+    Used as a retry strategy when the vision model reports the page is
+    "overexposed" or "washed out". Converts to grayscale and applies CLAHE
+    (local contrast enhancement) plus a global histogram stretch to recover
+    faint text. Returns the original bytes unchanged if OpenCV is unavailable
+    or the enhancement fails.
+    """
+    if not _HAS_CV2:
+        return image_bytes
+    try:
+        bgr = _pil_to_bgr(image_bytes)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+        # Global auto-contrast: stretch the histogram to use the full range.
+        # This darkens washed-out (too-bright) pages and brightens dark ones.
+        min_val, max_val = gray.min(), gray.max()
+        if max_val > min_val:
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+        # Local contrast enhancement (CLAHE) to recover faint text.
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        enhanced = clahe.apply(gray)
+
+        return _bgr_to_png(cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR))
+    except Exception as exc:
+        logger.warning("Contrast enhancement failed, using original image: %s", exc)
+        return image_bytes
