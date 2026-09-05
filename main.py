@@ -17,13 +17,11 @@ import click
 from config import get_config
 from database_sync import DatabaseSync
 from format_converter import FormatConverter
+from log_utils import setup_logging
 from pdf_processor import PDFProcessor
 from toc_builder import write_toc
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-)
+setup_logging(level=logging.INFO)
 logger = logging.getLogger("main")
 
 
@@ -36,8 +34,9 @@ logger = logging.getLogger("main")
 @click.option("--no-postprocess", is_flag=True, help="Disable text post-processing.")
 @click.option("--preprocess", is_flag=True, help="Enable OpenCV image preprocessing (deskew, etc.) before OCR.")
 @click.option("--max-pages", default=0, type=int, help="Limit pages per PDF (0 = all). Useful for testing.")
+@click.option("--only", default="", help="Process only this PDF filename (e.g. 1.pdf). Empty = all PDFs.")
 @click.option("--dry-run", is_flag=True, help="List discovered PDFs without processing.")
-def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, preprocess: bool, max_pages: int, dry_run: bool) -> None:
+def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, preprocess: bool, max_pages: int, only: str, dry_run: bool) -> None:
     config = get_config()
     config.pipeline.input_dir = input_dir
     config.pipeline.output_dir = output_dir
@@ -58,6 +57,11 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
     async def _run() -> None:
         try:
             pdfs = processor.discover_pdfs()
+            if only:
+                pdfs = [p for p in pdfs if p.name == only]
+                if not pdfs:
+                    click.echo(f"No PDF found matching --only {only}", err=True)
+                    return
             if dry_run:
                 for p in pdfs:
                     click.echo(str(p))
@@ -74,6 +78,10 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
                 markdown = result.markdown
                 toc_json_path, toc_md_path = write_toc(result, markdown)
 
+                logger.info(
+                    "Converting %s to output formats (md/html/epub/mobi/pdf) — this may take a minute for large documents...",
+                    result.rel_path,
+                )
                 outputs = converter.convert(result, markdown)
                 for fmt in skip:
                     outputs.pop(fmt, None)

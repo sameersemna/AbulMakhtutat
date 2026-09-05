@@ -13,7 +13,7 @@ import logging
 import time
 from pathlib import Path
 
-import fitz  # PyMuPDF
+import pymupdf
 
 from config import Config, get_config
 from models import DocumentResult, FileStatus, PageResult
@@ -24,6 +24,18 @@ from thermal import ThermalGuard
 logger = logging.getLogger(__name__)
 
 
+def _fmt_duration(seconds: float) -> str:
+    """Format a duration in seconds into a human-readable string."""
+    seconds = max(0.0, seconds)
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = seconds / 60
+    if minutes < 60:
+        return f"{minutes:.1f}m"
+    hours = minutes / 60
+    return f"{hours:.1f}h"
+
+
 def _file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:
@@ -32,11 +44,11 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _render_page(doc: fitz.Document, page_number: int, dpi: int) -> bytes:
+def _render_page(doc: pymupdf.Document, page_number: int, dpi: int) -> bytes:
     """Render a single page to PNG bytes at the given DPI."""
     page = doc[page_number - 1]
     zoom = dpi / 72.0
-    mat = fitz.Matrix(zoom, zoom)
+    mat = pymupdf.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat, alpha=False)
     return pix.tobytes("png")
 
@@ -114,7 +126,7 @@ class PDFProcessor:
         )
 
         try:
-            doc = fitz.open(str(pdf_path))
+            doc = pymupdf.open(str(pdf_path))
             real_page_count = doc.page_count
             result.total_pages = real_page_count
             if self.config.pipeline.max_pages > 0:
@@ -133,22 +145,47 @@ class PDFProcessor:
             self.state.mark(fhash, FileStatus.PROCESSING, rel_path=rel)
             completed = self.state.completed_pages(fhash)
 
-            tasks = []
-            for page_number in range(1, result.total_pages + 1):
-                if page_number in completed:
-                    continue
-                image_bytes = _render_page(doc, page_number, self.config.pipeline.dpi)
-                tasks.append(self._ocr_page_cached(fhash, page_number, image_bytes))
+            # Pages that still need OCR (not yet cached/completed).
+            pending = [pn for pn in range(1, result.total_pages + 1) if pn not in completed]
 
-            # Run with bounded concurrency.
+            if pending:
+                # Estimate duration: ~10s/page for the vision model, divided by workers.
+                est_seconds = len(pending) * 10.0 / max(self.config.pipeline.workers, 1)
+                logger.info(
+                    "Processing %s: %d pages total, %d pending OCR (est. %s)",
+                    rel, result.total_pages, len(pending), _fmt_duration(est_seconds),
+                )
+                logger.info(
+                    "Starting OCR for %s — this will take a while; progress is logged per page.",
+                    rel,
+                )
+            else:
+                logger.info("Processing %s: %d pages total, all already cached", rel, result.total_pages)
+
             sem = asyncio.Semaphore(self.config.pipeline.workers)
             self._semaphore = sem
+            done_count = 0
+            start_time = time.monotonic()
 
-            async def _bounded(coro):
+            async def _process_one(page_number: int) -> PageResult:
+                nonlocal done_count
                 async with sem:
-                    return await coro
+                    # Render lazily, just before OCR, to avoid holding all pages in memory.
+                    image_bytes = _render_page(doc, page_number, self.config.pipeline.dpi)
+                    result_page = await self._ocr_page_cached(fhash, page_number, image_bytes)
+                    done_count += 1
+                    elapsed = time.monotonic() - start_time
+                    rate = done_count / elapsed if elapsed > 0 else 0.0
+                    remaining = (len(pending) - done_count) / rate if rate > 0 else 0.0
+                    logger.info(
+                        "  [%d/%d] page %d OCR'd (%s) — elapsed %s, ETA %s",
+                        done_count, len(pending), page_number, result_page.model,
+                        _fmt_duration(elapsed), _fmt_duration(remaining),
+                    )
+                    return result_page
 
-            page_results = await asyncio.gather(*(_bounded(t) for t in tasks))
+            # Process pending pages with bounded concurrency, preserving order.
+            page_results = await asyncio.gather(*(_process_one(pn) for pn in pending))
 
             # Merge cached + freshly OCR'd pages in order.
             page_map = {p.page_number: p for p in page_results}

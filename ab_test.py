@@ -17,7 +17,7 @@ import logging
 from pathlib import Path
 
 import click
-import fitz
+import pymupdf
 
 from config import get_config
 from ocr_engine import OCREngine
@@ -27,10 +27,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(na
 logger = logging.getLogger("ab_test")
 
 
-def _render(doc: fitz.Document, page_number: int, dpi: int) -> bytes:
+def _render(doc: pymupdf.Document, page_number: int, dpi: int) -> bytes:
     page = doc[page_number - 1]
     zoom = dpi / 72.0
-    pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom), alpha=False)
+    pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
     return pix.tobytes("png")
 
 
@@ -48,7 +48,7 @@ def main(pdf: Path, pages: str, out: Path) -> None:
     thermal = ThermalGuard(config)
 
     async def run() -> None:
-        doc = fitz.open(str(pdf))
+        doc = pymupdf.open(str(pdf))
         results = []
         for pn in page_numbers:
             img = _render(doc, pn, config.pipeline.dpi)

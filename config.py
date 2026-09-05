@@ -85,7 +85,7 @@ class ThermalConfig:
     """GPU thermal throttling to prevent overheating / system crashes."""
 
     enabled: bool = _env_bool("THERMAL_GUARD_ENABLED", True)
-    max_temp: float = _env_float("THERMAL_MAX_TEMP", 70.0)  # Celsius (conservative)
+    max_temp: float = _env_float("THERMAL_MAX_TEMP", 77.5)  # Celsius (conservative)
     poll_interval: float = _env_float("THERMAL_POLL_INTERVAL", 10.0)  # seconds
     inter_page_delay: float = _env_float("THERMAL_INTER_PAGE_DELAY", 2.0)  # seconds
 
