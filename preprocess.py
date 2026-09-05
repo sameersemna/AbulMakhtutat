@@ -104,11 +104,28 @@ def _normalize_contrast(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
 
 
+def _light_contrast(bgr: np.ndarray) -> np.ndarray:
+    """Cheap global contrast normalization (no deskew/binarize/denoise).
+
+    Stretches the grayscale histogram to the full range and applies a mild
+    CLAHE pass. Fast and low-risk — intended for the "light" preprocessing mode.
+    """
+    gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    # Global histogram stretch to use the full brightness range.
+    min_val, max_val = gray.min(), gray.max()
+    if max_val > min_val:
+        gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    # Mild local contrast enhancement.
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+
+
 def preprocess(image_bytes: bytes, config: Config | None = None) -> bytes:
     """Apply the configured preprocessing pipeline to a page image.
 
-    Returns the (possibly transformed) PNG bytes. If OpenCV is missing or all
-    steps are disabled, returns the original bytes unchanged.
+    Returns the (possibly transformed) PNG bytes. If OpenCV is missing or the
+    mode is "off", returns the original bytes unchanged.
     """
     config = config or get_config()
     pp = config.pipeline.preprocess
@@ -116,11 +133,20 @@ def preprocess(image_bytes: bytes, config: Config | None = None) -> bytes:
     if not _HAS_CV2:
         logger.warning("OpenCV not available; skipping preprocessing")
         return image_bytes
-    if not pp.enabled:
+
+    mode = pp.mode.lower()
+    if mode == "off" and not pp.enabled:
         return image_bytes
 
     try:
         bgr = _pil_to_bgr(image_bytes)
+
+        if mode == "light":
+            # Cheap global contrast normalization only.
+            bgr = _light_contrast(bgr)
+            return _bgr_to_png(bgr)
+
+        # "full" mode (or legacy per-flag enablement).
         if pp.deskew:
             bgr, angle = _deskew(bgr)
             if angle:

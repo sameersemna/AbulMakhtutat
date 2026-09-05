@@ -32,11 +32,12 @@ logger = logging.getLogger("main")
 @click.option("--dpi", default=300, type=int, help="Render DPI for page images.")
 @click.option("--skip-formats", default="", help="Comma-separated formats to skip (md,html,epub,mobi,pdf).")
 @click.option("--no-postprocess", is_flag=True, help="Disable text post-processing.")
-@click.option("--preprocess", is_flag=True, help="Enable OpenCV image preprocessing (deskew, etc.) before OCR.")
+@click.option("--preprocess", "preprocess_mode", flag_value="full", default="off", help="Enable full OpenCV preprocessing (deskew, binarize, denoise, contrast).")
+@click.option("--preprocess-light", "preprocess_mode", flag_value="light", help="Enable light preprocessing (global contrast normalization only).")
 @click.option("--max-pages", default=0, type=int, help="Limit pages per PDF (0 = all). Useful for testing.")
 @click.option("--only", default="", help="Process only this PDF filename (e.g. 1.pdf). Empty = all PDFs.")
 @click.option("--dry-run", is_flag=True, help="List discovered PDFs without processing.")
-def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, preprocess: bool, max_pages: int, only: str, dry_run: bool) -> None:
+def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, preprocess_mode: str, max_pages: int, only: str, dry_run: bool) -> None:
     config = get_config()
     config.pipeline.input_dir = input_dir
     config.pipeline.output_dir = output_dir
@@ -45,7 +46,8 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
     config.pipeline.max_pages = max_pages
     if no_postprocess:
         config.ollama.postprocess_enabled = False
-    if preprocess:
+    if preprocess_mode in ("light", "full"):
+        config.pipeline.preprocess.mode = preprocess_mode
         config.pipeline.preprocess.enabled = True
     config.ensure_dirs()
 

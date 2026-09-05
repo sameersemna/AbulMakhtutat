@@ -71,8 +71,15 @@ class OllamaConfig:
 
 @dataclass
 class PreprocessConfig:
-    """OpenCV image preprocessing applied before vision OCR."""
+    """OpenCV image preprocessing applied before vision OCR.
 
+    `mode` selects a preset:
+      - "off"  : no preprocessing (default; vision-LLM handles clean scans).
+      - "light": cheap global contrast normalization only (fast, low-risk).
+      - "full" : deskew + binarize + denoise + contrast (heavy pipeline).
+    """
+
+    mode: str = os.getenv("PREPROCESS_MODE", "off")
     enabled: bool = _env_bool("PREPROCESS_ENABLED", False)
     deskew: bool = _env_bool("PREPROCESS_DESKEW", True)
     binarize: bool = _env_bool("PREPROCESS_BINARIZE", False)
