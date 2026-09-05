@@ -19,6 +19,7 @@ from config import Config, get_config
 from models import DocumentResult, FileStatus, PageResult
 from ocr_engine import OCREngine
 from state_tracker import StateTracker
+from thermal import ThermalGuard
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class PDFProcessor:
         self.config = config or get_config()
         self.engine = OCREngine(self.config)
         self.state = StateTracker(self.config)
+        self.thermal = ThermalGuard(self.config)
         self._semaphore: asyncio.Semaphore | None = None
 
     async def close(self) -> None:
@@ -75,6 +77,8 @@ class PDFProcessor:
 
         start = time.monotonic()
         try:
+            # Wait for the GPU to cool before starting this page's inference.
+            await self.thermal.wait_if_hot()
             raw, model = await self.engine.ocr_page(image_bytes)
             text = await self.engine.postprocess(raw)
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -83,6 +87,9 @@ class PDFProcessor:
             duration_ms = int((time.monotonic() - start) * 1000)
             logger.error("OCR failed for page %d: %s", page_number, exc)
             result = PageResult(page_number=page_number, text="", model="", duration_ms=duration_ms, error=str(exc))
+
+        # Optional breathing room between pages to avoid sustained GPU load.
+        await self.thermal.cooldown_between_pages()
 
         if self.config.pipeline.use_cache and not result.error:
             cache_path.parent.mkdir(parents=True, exist_ok=True)

@@ -18,6 +18,7 @@ import httpx
 from PIL import Image
 
 from config import Config, get_config
+from preprocess import preprocess
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +121,10 @@ class OCREngine:
         raise RuntimeError("No vision model available")
 
     def _prepare_image(self, image_bytes: bytes) -> str:
-        """Downscale the page image to a bounded long edge, then base64-encode."""
+        """Preprocess (optional) and downscale the page image, then base64-encode."""
+        # Optional OpenCV preprocessing (deskew, binarize, denoise, contrast).
+        image_bytes = preprocess(image_bytes, self.config)
+
         max_dim = self.config.ollama.max_image_dim
         if max_dim and max_dim > 0:
             try:

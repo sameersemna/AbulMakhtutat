@@ -30,13 +30,14 @@ logger = logging.getLogger("main")
 @click.command()
 @click.option("--input-dir", default="./input", type=click.Path(path_type=Path), help="Root input directory.")
 @click.option("--output-dir", default="./output", type=click.Path(path_type=Path), help="Root output directory.")
-@click.option("--workers", default=4, type=int, help="Concurrent OCR workers.")
+@click.option("--workers", default=1, type=int, help="Concurrent OCR workers (keep low to avoid GPU overheating).")
 @click.option("--dpi", default=300, type=int, help="Render DPI for page images.")
 @click.option("--skip-formats", default="", help="Comma-separated formats to skip (md,html,epub,mobi,pdf).")
 @click.option("--no-postprocess", is_flag=True, help="Disable text post-processing.")
+@click.option("--preprocess", is_flag=True, help="Enable OpenCV image preprocessing (deskew, etc.) before OCR.")
 @click.option("--max-pages", default=0, type=int, help="Limit pages per PDF (0 = all). Useful for testing.")
 @click.option("--dry-run", is_flag=True, help="List discovered PDFs without processing.")
-def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, max_pages: int, dry_run: bool) -> None:
+def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, preprocess: bool, max_pages: int, dry_run: bool) -> None:
     config = get_config()
     config.pipeline.input_dir = input_dir
     config.pipeline.output_dir = output_dir
@@ -45,6 +46,8 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
     config.pipeline.max_pages = max_pages
     if no_postprocess:
         config.ollama.postprocess_enabled = False
+    if preprocess:
+        config.pipeline.preprocess.enabled = True
     config.ensure_dirs()
 
     processor = PDFProcessor(config)
@@ -53,52 +56,52 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
     skip = {s.strip() for s in skip_formats.split(",") if s.strip()}
 
     async def _run() -> None:
-        pdfs = processor.discover_pdfs()
-        if dry_run:
-            for p in pdfs:
-                click.echo(str(p))
-            return
+        try:
+            pdfs = processor.discover_pdfs()
+            if dry_run:
+                for p in pdfs:
+                    click.echo(str(p))
+                return
 
-        results = await processor.run()
-        summary = []
-        for result in results:
-            if result.status.value == "failed":
-                logger.error("FAILED: %s (%s)", result.rel_path, result.error)
-                summary.append({"rel_path": result.rel_path, "status": "failed", "error": result.error})
-                continue
+            results = await processor.run()
+            summary = []
+            for result in results:
+                if result.status.value == "failed":
+                    logger.error("FAILED: %s (%s)", result.rel_path, result.error)
+                    summary.append({"rel_path": result.rel_path, "status": "failed", "error": result.error})
+                    continue
 
-            markdown = result.markdown
-            toc_json_path, toc_md_path = write_toc(result, markdown)
+                markdown = result.markdown
+                toc_json_path, toc_md_path = write_toc(result, markdown)
 
-            outputs = converter.convert(result, markdown)
-            for fmt in skip:
-                outputs.pop(fmt, None)
+                outputs = converter.convert(result, markdown)
+                for fmt in skip:
+                    outputs.pop(fmt, None)
 
-            # Load toc entries for DB sync.
-            toc_entries = json.loads(toc_json_path.read_text(encoding="utf-8")).get("entries", [])
+                # Load toc entries for DB sync.
+                toc_entries = json.loads(toc_json_path.read_text(encoding="utf-8")).get("entries", [])
 
-            await db_sync.sync(result, toc_entries, processor.engine)
+                await db_sync.sync(result, toc_entries, processor.engine)
 
-            produced = {k: (str(v) if v else None) for k, v in outputs.items()}
-            summary.append(
-                {
-                    "rel_path": result.rel_path,
-                    "status": "completed",
-                    "pages": result.total_pages,
-                    "outputs": produced,
-                }
-            )
-            logger.info("COMPLETED: %s (%d pages) -> %s", result.rel_path, result.total_pages, result.output_dir)
+                produced = {k: (str(v) if v else None) for k, v in outputs.items()}
+                summary.append(
+                    {
+                        "rel_path": result.rel_path,
+                        "status": "completed",
+                        "pages": result.total_pages,
+                        "outputs": produced,
+                    }
+                )
+                logger.info("COMPLETED: %s (%d pages) -> %s", result.rel_path, result.total_pages, result.output_dir)
 
-        # Write a run summary manifest.
-        manifest = config.pipeline.output_dir / "run_summary.json"
-        manifest.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        click.echo(f"\nDone. Processed {len(summary)} document(s). Summary: {manifest}")
+            # Write a run summary manifest.
+            manifest = config.pipeline.output_dir / "run_summary.json"
+            manifest.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+            click.echo(f"\nDone. Processed {len(summary)} document(s). Summary: {manifest}")
+        finally:
+            await processor.close()
 
-    try:
-        asyncio.run(_run())
-    finally:
-        asyncio.run(processor.close())
+    asyncio.run(_run())
 
 
 if __name__ == "__main__":

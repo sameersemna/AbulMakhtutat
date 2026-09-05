@@ -46,13 +46,15 @@ class OllamaConfig:
 
     base_url: str = field(default_factory=lambda: os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"))
     # NOTE: llama3.2-vision:11b is broken on this Ollama build (mllama arch).
-    # qwen3-vl:32b-instruct-q8_0 is the verified best Arabic vision OCR model.
-    vision_model: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "qwen3-vl:32b-instruct-q8_0"))
-    vision_fallback: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_FALLBACK", "minicpm-v:8b"))
+    # qwen2.5vl:7b (6GB) is the primary model: excellent Arabic OCR, ~5-15s/page,
+    # and a fraction of the GPU heat of the 35GB qwen3-vl:32b (which caused
+    # thermal crashes at ~86s/page of sustained 95% GPU utilization).
+    vision_model: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_MODEL", "qwen2.5vl:7b"))
+    vision_fallback: str = field(default_factory=lambda: os.getenv("OLLAMA_VISION_FALLBACK", "qwen3-vl:latest"))
     postprocess_model: str = field(default_factory=lambda: os.getenv("OLLAMA_POSTPROCESS_MODEL", "qwen2.5-coder:14b"))
     postprocess_enabled: bool = _env_bool("OLLAMA_POSTPROCESS_ENABLED", False)
     embed_model: str = field(default_factory=lambda: os.getenv("OLLAMA_EMBED_MODEL", "bge-m3"))
-    timeout: float = _env_float("OLLAMA_TIMEOUT", 600.0)
+    timeout: float = _env_float("OLLAMA_TIMEOUT", 300.0)
     max_retries: int = _env_int("OLLAMA_MAX_RETRIES", 3)
     backoff_base: float = _env_float("OLLAMA_BACKOFF_BASE", 2.0)
     temperature: float = _env_float("OLLAMA_TEMPERATURE", 0.0)
@@ -62,17 +64,39 @@ class OllamaConfig:
 
 
 @dataclass
+class PreprocessConfig:
+    """OpenCV image preprocessing applied before vision OCR."""
+
+    enabled: bool = _env_bool("PREPROCESS_ENABLED", False)
+    deskew: bool = _env_bool("PREPROCESS_DESKEW", True)
+    binarize: bool = _env_bool("PREPROCESS_BINARIZE", False)
+    denoise: bool = _env_bool("PREPROCESS_DENOISE", False)
+    normalize_contrast: bool = _env_bool("PREPROCESS_NORMALIZE_CONTRAST", False)
+
+
+@dataclass
+class ThermalConfig:
+    """GPU thermal throttling to prevent overheating / system crashes."""
+
+    enabled: bool = _env_bool("THERMAL_GUARD_ENABLED", True)
+    max_temp: float = _env_float("THERMAL_MAX_TEMP", 70.0)  # Celsius (conservative)
+    poll_interval: float = _env_float("THERMAL_POLL_INTERVAL", 10.0)  # seconds
+    inter_page_delay: float = _env_float("THERMAL_INTER_PAGE_DELAY", 2.0)  # seconds
+
+
+@dataclass
 class PipelineConfig:
     """Pipeline-wide tunables."""
 
     input_dir: Path = field(default_factory=lambda: Path(os.getenv("INPUT_DIR", "./input")))
     output_dir: Path = field(default_factory=lambda: Path(os.getenv("OUTPUT_DIR", "./output")))
     dpi: int = _env_int("OCR_DPI", 300)
-    workers: int = _env_int("OCR_WORKERS", 4)
+    workers: int = _env_int("OCR_WORKERS", 1)  # default 1 to avoid GPU overload
     max_pages: int = _env_int("OCR_MAX_PAGES", 0)  # 0 = all pages
-    # Optional CPU fallback via tesseract (rarely used; vision OCR is primary)
-    tesseract_fallback: bool = _env_bool("OCR_TESSERACT_FALLBACK", False)
-    tesseract_lang: str = os.getenv("OCR_TESSERACT_LANG", "ara")
+    # OpenCV preprocessing (applied before vision OCR)
+    preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
+    # GPU thermal throttling
+    thermal: ThermalConfig = field(default_factory=ThermalConfig)
     # Per-page cache directory (avoids re-OCR on resume)
     cache_dir: Path = field(default_factory=lambda: Path(os.getenv("OCR_CACHE_DIR", "./.ocr_cache")))
     use_cache: bool = _env_bool("OCR_USE_CACHE", True)

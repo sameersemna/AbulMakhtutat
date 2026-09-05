@@ -25,10 +25,11 @@ structured multi-format output (`.md`, `.html`, `.pdf`, `.epub`, `.mobi`).
 
 | Model | Status |
 |-------|--------|
-| `qwen3-vl:32b-instruct-q8_0` | ✅ **Primary** — excellent Arabic OCR with diacritics |
+| `qwen2.5vl:7b` | ✅ **Primary** — excellent Arabic OCR, ~5-15s/page, low GPU heat |
+| `qwen3-vl:latest` | ✅ Fallback — 6.1GB, good quality |
+| `qwen3-vl:32b-instruct-q8_0` | ⚠️ 35GB — best quality but caused thermal crashes (~86s/page @ 95% GPU) |
 | `llama3.2-vision:11b` | ❌ Broken on this Ollama build (`mllama` arch → HTTP 500) |
-| `minicpm-v:8b` | ⚠️ Poor Arabic (hallucinates watermarks) — fallback only |
-| `Kimi-VL-A3B-Thinking` | ❌ No multimodal support via `/api/generate` |
+| `minicpm-v:8b` | ⚠️ Poor Arabic (hallucinates watermarks) |
 
 ## Requirements
 
@@ -68,6 +69,7 @@ python main.py --dry-run
 | `--max-pages` | `0` (all) | Limit pages per PDF (testing) |
 | `--skip-formats` | `""` | Comma-separated formats to skip |
 | `--no-postprocess` | off | Disable text post-processing |
+| `--preprocess` | off | Enable OpenCV preprocessing (deskew, etc.) before OCR |
 | `--dry-run` | off | List PDFs only |
 
 ## Output Structure
@@ -93,12 +95,21 @@ All settings are environment-driven (see `config.py`). Key variables:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `OLLAMA_VISION_MODEL` | `qwen3-vl:32b-instruct-q8_0` | Primary vision model |
-| `OLLAMA_VISION_FALLBACK` | `minicpm-v:8b` | Fallback vision model |
+| `OLLAMA_VISION_MODEL` | `qwen2.5vl:7b` | Primary vision model |
+| `OLLAMA_VISION_FALLBACK` | `qwen3-vl:latest` | Fallback vision model |
 | `OLLAMA_POSTPROCESS_ENABLED` | `false` | Enable text post-processing |
 | `OLLAMA_MAX_IMAGE_DIM` | `1500` | Downscale long edge before OCR |
 | `OCR_DPI` | `300` | Render DPI |
-| `OCR_WORKERS` | `4` | Concurrency |
+| `OCR_WORKERS` | `1` | Concurrency (keep low to avoid GPU overheating) |
+| `THERMAL_GUARD_ENABLED` | `true` | Pause OCR when GPU is too hot |
+| `THERMAL_MAX_TEMP` | `70.0` | Max GPU temp (°C) before pausing |
+| `THERMAL_POLL_INTERVAL` | `10.0` | Seconds between temp checks while cooling |
+| `THERMAL_INTER_PAGE_DELAY` | `2.0` | Delay (s) between pages to let GPU cool |
+| `PREPROCESS_ENABLED` | `false` | Enable OpenCV preprocessing |
+| `PREPROCESS_DESKEW` | `true` | Skew correction |
+| `PREPROCESS_BINARIZE` | `false` | Adaptive thresholding |
+| `PREPROCESS_DENOISE` | `false` | Non-local means denoising |
+| `PREPROCESS_NORMALIZE_CONTRAST` | `false` | CLAHE contrast normalization |
 | `REDIS_ENABLED` | `false` | Remote state tracking |
 | `POSTGRES_ENABLED` | `false` | Execution logs / metadata |
 | `ELASTICSEARCH_ENABLED` | `false` | Full-text Arabic search |
@@ -123,6 +134,8 @@ still produces local output and logs a warning.
 | `models.py` | Dataclasses (`PageResult`, `DocumentResult`, `TocEntry`) |
 | `state_tracker.py` | Redis + JSON idempotent state |
 | `ocr_engine.py` | Ollama vision OCR + post-processing |
+| `preprocess.py` | OpenCV image preprocessing (deskew, binarize, denoise, contrast) |
+| `thermal.py` | GPU thermal guard (pauses OCR when GPU overheats) |
 | `pdf_processor.py` | Async traversal, rendering, Markdown assembly |
 | `toc_builder.py` | ToC extraction → `toc.json` / `TOC.md` |
 | `format_converter.py` | Pandoc/WeasyPrint multi-format output |
