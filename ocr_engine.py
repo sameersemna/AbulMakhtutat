@@ -49,7 +49,15 @@ OCR TEXT:
 
 
 class OCREngine:
-    """Async client for Ollama vision + text post-processing."""
+    """Async client for Ollama vision + text post-processing.
+
+    Serializes all inference calls through a global queue (asyncio lock) so
+    only one runs at a time, preventing GPU overload/overheating. Models stay
+    resident in GPU memory (default keep-alive) to avoid reload latency.
+    """
+
+    # Global queue (lock) shared across all OCREngine instances in the process.
+    _global_lock: asyncio.Lock | None = None
 
     def __init__(self, config: Config | None = None):
         self.config = config or get_config()
@@ -57,6 +65,8 @@ class OCREngine:
             base_url=self.config.ollama.base_url,
             timeout=httpx.Timeout(self.config.ollama.timeout),
         )
+        if OCREngine._global_lock is None:
+            OCREngine._global_lock = asyncio.Lock()
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -69,11 +79,16 @@ class OCREngine:
         *,
         format_json: bool = False,
     ) -> str:
-        """Call Ollama /api/generate with retry + exponential backoff."""
+        """Call Ollama /api/generate with retry + exponential backoff.
+
+        Serialized through a global queue so only one inference runs at a time.
+        Models remain resident (keep-alive) to avoid reload latency.
+        """
         payload: dict[str, Any] = {
             "model": model,
             "prompt": prompt,
             "stream": False,
+            "keep_alive": self.config.ollama.keep_alive,
             "options": {
                 "temperature": self.config.ollama.temperature,
                 "num_ctx": self.config.ollama.num_ctx,
@@ -84,26 +99,34 @@ class OCREngine:
         if format_json:
             payload["format"] = "json"
 
-        last_err: Exception | None = None
-        for attempt in range(self.config.ollama.max_retries):
-            try:
-                resp = await self._client.post("/api/generate", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                return data.get("response", "")
-            except (httpx.HTTPError, ValueError) as exc:
-                last_err = exc
-                wait = self.config.ollama.backoff_base ** attempt
-                logger.warning(
-                    "Ollama call failed (attempt %d/%d) for model %s: %s — retrying in %.1fs",
-                    attempt + 1,
-                    self.config.ollama.max_retries,
-                    model,
-                    exc,
-                    wait,
-                )
-                await asyncio.sleep(wait)
-        raise RuntimeError(f"Ollama call failed after {self.config.ollama.max_retries} attempts: {last_err}")
+        lock = OCREngine._global_lock if self.config.ollama.queue_inference else None
+
+        async def _call() -> str:
+            last_err: Exception | None = None
+            for attempt in range(self.config.ollama.max_retries):
+                try:
+                    resp = await self._client.post("/api/generate", json=payload)
+                    resp.raise_for_status()
+                    data = resp.json()
+                    return data.get("response", "")
+                except (httpx.HTTPError, ValueError) as exc:
+                    last_err = exc
+                    wait = self.config.ollama.backoff_base ** attempt
+                    logger.warning(
+                        "Ollama call failed (attempt %d/%d) for model %s: %s — retrying in %.1fs",
+                        attempt + 1,
+                        self.config.ollama.max_retries,
+                        model,
+                        exc,
+                        wait,
+                    )
+                    await asyncio.sleep(wait)
+            raise RuntimeError(f"Ollama call failed after {self.config.ollama.max_retries} attempts: {last_err}")
+
+        if lock is not None:
+            async with lock:
+                return await _call()
+        return await _call()
 
     async def ocr_page(self, image_bytes: bytes) -> tuple[str, str]:
         """OCR a single page image. Returns (text, model_used)."""
@@ -151,9 +174,19 @@ class OCREngine:
 
     async def embed(self, text: str) -> list[float]:
         """Generate a vector embedding for a text snippet (for Qdrant)."""
-        resp = await self._client.post(
-            "/api/embeddings",
-            json={"model": self.config.ollama.embed_model, "prompt": text},
-        )
-        resp.raise_for_status()
-        return resp.json().get("embedding", [])
+        payload = {
+            "model": self.config.ollama.embed_model,
+            "prompt": text,
+            "keep_alive": self.config.ollama.keep_alive,
+        }
+        lock = OCREngine._global_lock if self.config.ollama.queue_inference else None
+
+        async def _call() -> list[float]:
+            resp = await self._client.post("/api/embeddings", json=payload)
+            resp.raise_for_status()
+            return resp.json().get("embedding", [])
+
+        if lock is not None:
+            async with lock:
+                return await _call()
+        return await _call()

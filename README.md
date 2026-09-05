@@ -99,6 +99,8 @@ All settings are environment-driven (see `config.py`). Key variables:
 | `OLLAMA_VISION_FALLBACK` | `qwen3-vl:latest` | Fallback vision model |
 | `OLLAMA_POSTPROCESS_ENABLED` | `false` | Enable text post-processing |
 | `OLLAMA_MAX_IMAGE_DIM` | `1500` | Downscale long edge before OCR |
+| `OLLAMA_KEEP_ALIVE` | `5m` | How long models stay resident in GPU memory |
+| `OLLAMA_QUEUE_INFERENCE` | `true` | Serialize all inference calls through one queue |
 | `OCR_DPI` | `300` | Render DPI |
 | `OCR_WORKERS` | `1` | Concurrency (keep low to avoid GPU overheating) |
 | `THERMAL_GUARD_ENABLED` | `true` | Pause OCR when GPU is too hot |
@@ -119,6 +121,19 @@ All settings are environment-driven (see `config.py`). Key variables:
 
 All remote backends are **fail-soft**: if a service is unreachable, the pipeline
 still produces local output and logs a warning.
+
+## Inference Queueing (thermal safety)
+
+To prevent GPU overheating, the pipeline **queues inference calls** so only one
+runs at a time, while keeping models resident in GPU memory (no reload latency):
+
+- A global asyncio lock serializes all Ollama calls (vision, fallback,
+  post-process, embed) so only one inference runs at a time.
+- Models stay loaded (`keep_alive=5m` default) so we don't waste time
+  reloading them between pages.
+
+This is controlled by `OLLAMA_QUEUE_INFERENCE` (default `true`) and
+`OLLAMA_KEEP_ALIVE` (default `5m`).
 
 ## Resume / Idempotency
 

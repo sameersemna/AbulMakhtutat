@@ -59,6 +59,12 @@ class OllamaConfig:
     backoff_base: float = _env_float("OLLAMA_BACKOFF_BASE", 2.0)
     temperature: float = _env_float("OLLAMA_TEMPERATURE", 0.0)
     num_ctx: int = _env_int("OLLAMA_NUM_CTX", 8192)
+    # Keep models resident in GPU memory (default Ollama keep-alive) so we don't
+    # waste time reloading. Inference calls are serialized via a queue instead.
+    keep_alive: str = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
+    # Serialize all Ollama inference calls through a single global queue so only
+    # one runs at a time (prevents GPU overload/overheating).
+    queue_inference: bool = _env_bool("OLLAMA_QUEUE_INFERENCE", True)
     # Downscale page images to this max long-edge dimension before sending.
     max_image_dim: int = _env_int("OLLAMA_MAX_IMAGE_DIM", 1500)
 
