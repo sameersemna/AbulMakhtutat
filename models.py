@@ -24,6 +24,7 @@ class PageResult:
     model: str
     duration_ms: int = 0
     error: str | None = None
+    quality: float = 1.0  # heuristic confidence score (0.0 = bad, 1.0 = good)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

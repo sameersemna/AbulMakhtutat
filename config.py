@@ -13,6 +13,39 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+def _load_dotenv(path: Path | None = None) -> None:
+    """Load a `.env` file into the environment (no external dependency).
+
+    Reads `KEY=VALUE` lines from the given path (default: `.env` in the current
+    working directory) and sets them via `os.environ` only if not already set.
+    Lines starting with `#` are comments; blank lines are ignored. Values may be
+    optionally quoted. This runs at import time so all config defaults pick up
+    the values.
+    """
+    env_path = path or Path(".env")
+    if not env_path.exists():
+        return
+    try:
+        for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            # Strip surrounding quotes if present.
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+                value = value[1:-1]
+            # Do not override variables already set in the real environment.
+            os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
+# Load .env (if present) before any config defaults are evaluated.
+_load_dotenv()
+
+
 def _env_bool(name: str, default: bool = False) -> bool:
     val = os.getenv(name)
     if val is None:
@@ -92,8 +125,10 @@ class ThermalConfig:
     """GPU thermal throttling to prevent overheating / system crashes."""
 
     enabled: bool = _env_bool("THERMAL_GUARD_ENABLED", True)
-    max_temp: float = _env_float("THERMAL_MAX_TEMP", 77.5)  # Celsius (conservative)
-    poll_interval: float = _env_float("THERMAL_POLL_INTERVAL", 10.0)  # seconds
+    max_temp: float = _env_float("THERMAL_MAX_TEMP", 70.0)  # Celsius — pause threshold
+    critical_temp: float = _env_float("THERMAL_CRITICAL_TEMP", 75.0)  # Celsius — peak that forces cooldown
+    poll_interval: float = _env_float("THERMAL_POLL_INTERVAL", 5.0)  # seconds (cooldown wait)
+    monitor_interval: float = _env_float("THERMAL_MONITOR_INTERVAL", 2.0)  # seconds (background sampling)
     inter_page_delay: float = _env_float("THERMAL_INTER_PAGE_DELAY", 2.0)  # seconds
 
 

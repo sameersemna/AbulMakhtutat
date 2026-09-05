@@ -5,6 +5,9 @@ __pycache__/
 .venv/
 venv/
 
+# Environment (secrets / local config)
+.env
+
 # Pipeline runtime artifacts
 .ocr_cache/
 .ocr_state.json

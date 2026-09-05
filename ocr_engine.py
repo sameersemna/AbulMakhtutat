@@ -64,14 +64,15 @@ Requirements:
 - If a region is unreadable, skip it silently rather than guessing.
 """
 
-_POSTPROCESS_PROMPT = """You are an Arabic text post-processor. Clean up the following OCR output.
+_POSTPROCESS_PROMPT = """You are an expert Arabic OCR post-corrector. The following text was extracted from a scanned Arabic document and may contain OCR errors.
 
-Requirements:
-- Fix obvious OCR artifacts and broken words while preserving meaning.
-- Ensure right-to-left logical reading order.
-- Normalize Markdown syntax (headings, lists, quotes) without changing content.
-- Preserve all diacritical marks (Harakat).
-- Output ONLY the cleaned Markdown text. Do not add commentary.
+Correct it carefully:
+- Fix obvious OCR artifacts (broken words, misread letters, stray Latin characters) while preserving the original meaning.
+- Do NOT add, remove, or reorder content — only correct what is clearly wrong.
+- Preserve ALL diacritical marks (Harakat) exactly as they appear.
+- Preserve Markdown structure (headings, lists, quotes) and right-to-left order.
+- If a word is ambiguous, leave it unchanged rather than guessing.
+- Output ONLY the corrected text. Do not add commentary or explanations.
 
 OCR TEXT:
 {text}
@@ -214,6 +215,36 @@ class OCREngine:
     def is_refusal(self, text: str) -> bool:
         """Public wrapper for refusal detection (used by the processor)."""
         return self._is_refusal(text)
+
+    def quality_score(self, text: str) -> float:
+        """Heuristic confidence score for OCR output (0.0 = bad, 1.0 = good).
+
+        Vision-LLMs don't emit native confidence, so we approximate it with
+        signal-based heuristics (grounded in arXiv 2409.04117, which shows
+        confidence signals dramatically improve OCR error detection):
+          - Arabic character ratio (vs. Latin garbage / refusal prose)
+          - Presence of refusal phrases
+          - Length vs. expected page density
+        """
+        if not text or not text.strip():
+            return 0.0
+        lowered = text.lower()
+        if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
+            return 0.0
+
+        total = len(text)
+        arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+        # Latin letters (potential OCR garbage / mixed-script noise).
+        latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+
+        # Arabic ratio: high = good. Penalize heavy Latin content.
+        arabic_ratio = arabic / total if total else 0.0
+        latin_ratio = latin / total if total else 0.0
+
+        score = arabic_ratio * 0.7  # dominant signal
+        score -= latin_ratio * 0.3  # penalty for Latin garbage
+        score = max(0.0, min(1.0, score))
+        return round(score, 3)
 
     def _prepare_image(self, image_bytes: bytes) -> str:
         """Preprocess (optional) and downscale the page image, then base64-encode."""

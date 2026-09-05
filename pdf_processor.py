@@ -64,6 +64,7 @@ class PDFProcessor:
         self._semaphore: asyncio.Semaphore | None = None
 
     async def close(self) -> None:
+        await self.thermal.stop()
         await self.engine.close()
 
     def discover_pdfs(self) -> list[Path]:
@@ -98,19 +99,23 @@ class PDFProcessor:
             raw, model = await self.engine.ocr_page(image_bytes)
             text = await self.engine.postprocess(raw)
             duration_ms = int((time.monotonic() - start) * 1000)
+            quality = self.engine.quality_score(text)
             if not text.strip():
                 # OCR returned empty (all attempts refused) — treat as failure
                 # so it is NOT cached and can be retried on a future run.
                 result = PageResult(
                     page_number=page_number, text="", model=model,
                     duration_ms=duration_ms, error="OCR returned no text (all attempts refused)",
+                    quality=0.0,
                 )
             else:
-                result = PageResult(page_number=page_number, text=text, model=model, duration_ms=duration_ms)
+                result = PageResult(page_number=page_number, text=text, model=model, duration_ms=duration_ms, quality=quality)
+                if quality < 0.5:
+                    logger.warning("Low-quality OCR for page %d (score %.2f)", page_number, quality)
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
             logger.error("OCR failed for page %d: %s", page_number, exc)
-            result = PageResult(page_number=page_number, text="", model="", duration_ms=duration_ms, error=str(exc))
+            result = PageResult(page_number=page_number, text="", model="", duration_ms=duration_ms, error=str(exc), quality=0.0)
 
         # Optional breathing room between pages to avoid sustained GPU load.
         await self.thermal.cooldown_between_pages()
@@ -226,6 +231,9 @@ class PDFProcessor:
         """Process all discovered PDFs."""
         pdfs = self.discover_pdfs()
         logger.info("Discovered %d PDF(s) in %s", len(pdfs), self.config.pipeline.input_dir)
+        # Start the continuous temperature monitor so we can detect spikes that
+        # occur *during* inference (not just before each page).
+        self.thermal.start()
         results: list[DocumentResult] = []
         for pdf in pdfs:
             results.append(await self.process_pdf(pdf))
