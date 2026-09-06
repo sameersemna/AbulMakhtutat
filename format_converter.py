@@ -188,7 +188,8 @@ class FormatConverter:
         from preprocess import detect_line_boxes
 
         mode = self.config.pipeline.overlay_mode
-        if mode == "off":
+        if mode in ("off", "bbox"):
+            # "bbox" mode is handled separately (async, needs the engine).
             return None
 
         font_path = self.config.pipeline.overlay_font
@@ -246,7 +247,7 @@ class FormatConverter:
         escaped = _html.escape(clean).replace("\n", "<br>")
         html = (
             f'<div style="font-family: Noto Naskh Arabic; '
-            f'font-size: 9px; opacity: 0; direction: rtl; '
+            f'font-size: 9px; direction: rtl; '
             f'text-align: right;">{escaped}</div>'
         )
         margin = 20
@@ -254,7 +255,8 @@ class FormatConverter:
             margin, margin,
             page.rect.width - margin, page.rect.height - margin,
         )
-        page.insert_htmlbox(rect, html)
+        # opacity=0 (native param) makes text invisible but still searchable.
+        page.insert_htmlbox(rect, html, opacity=0)
 
     def _overlay_word_aligned(self, page, clean: str, img_bytes: bytes, _html) -> None:
         """Overlay text line-by-line, aligned to OpenCV-detected text-line boxes."""
@@ -290,10 +292,11 @@ class FormatConverter:
             escaped = _html.escape(line)
             html = (
                 f'<div style="font-family: Noto Naskh Arabic; '
-                f'font-size: 9px; opacity: 0; direction: rtl; '
+                f'font-size: 9px; direction: rtl; '
                 f'text-align: right;">{escaped}</div>'
             )
-            page.insert_htmlbox(rect, html)
+            # opacity=0 (native param) makes text invisible but still searchable.
+            page.insert_htmlbox(rect, html, opacity=0)
 
     @staticmethod
     def _strip_markdown(text: str) -> str:
@@ -324,3 +327,124 @@ class FormatConverter:
         outputs["mobi"] = self._write_mobi(result)
         outputs["overlay"] = self._write_overlay_pdf(result)
         return outputs
+
+    async def write_overlay_bbox(self, result: DocumentResult, engine) -> Path | None:
+        """Generate a searchable PDF with model-precise bounding-box alignment.
+
+        Uses the vision model's visual grounding (`bbox_2d` coordinates) to place
+        each OCR text line exactly where the model detected it, then renders it
+        as an invisible (opacity=0) but searchable text layer over the scan.
+
+        This is the most accurate overlay mode: position AND font size are
+        derived from the model's own bounding boxes, so selection highlights
+        match the scanned text closely.
+        """
+        import html as _html
+        import io as _io
+
+        import pymupdf
+        from PIL import Image
+
+        from preprocess import detect_words_reading_order
+
+        mode = self.config.pipeline.overlay_mode
+        if mode != "bbox":
+            return None
+
+        font_path = self.config.pipeline.overlay_font
+        if not Path(font_path).exists():
+            logger.warning("Overlay font not found at %s; skipping bbox overlay", font_path)
+            return None
+
+        out_path = result.output_dir / f"{result.source_path.stem}_overlay.pdf"
+        try:
+            src = pymupdf.open(str(result.source_path))
+            out = pymupdf.open()
+
+            # Load the Arabic font once for exact metric-based sizing.
+            font = pymupdf.Font(fontfile=font_path)
+            line_height_ratio = font.ascender - font.descender
+
+            for page in result.pages:
+                page_num = page.page_number
+                if page_num < 1 or page_num > src.page_count:
+                    continue
+
+                src_page = src[page_num - 1]
+                zoom = self.config.pipeline.dpi / 72.0
+                pix = src_page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
+                img_bytes = pix.tobytes("png")
+
+                # Get model word text + approximate bbox, and OpenCV pixel-accurate
+                # word components. The model's text is accurate and its word count
+                # is correct; OpenCV's boxes are pixel-accurate but over-segment
+                # (diacritics/dots become separate components). We snap each model
+                # word to the nearest OpenCV component for precise placement.
+                model_boxes = await engine.ocr_page_with_boxes(img_bytes)
+                cv_boxes = detect_words_reading_order(img_bytes)
+
+                # Create the page with the scan as the visible image.
+                new_page = out.new_page(width=src_page.rect.width, height=src_page.rect.height)
+                new_page.insert_image(new_page.rect, stream=img_bytes)
+
+                if not model_boxes or not cv_boxes:
+                    continue
+
+                # Scale: rendered image pixels -> PDF points.
+                scale_x = src_page.rect.width / pix.width
+                scale_y = src_page.rect.height / pix.height
+
+                # Determine the downscaled image dims (model bbox space).
+                max_dim = self.config.ollama.max_image_dim
+                im = Image.open(_io.BytesIO(img_bytes))
+                im.thumbnail((max_dim, max_dim))
+                ds_w, ds_h = im.size
+                # Model bbox (downscaled px) -> rendered px.
+                mscale_x = pix.width / ds_w
+                mscale_y = pix.height / ds_h
+
+                for box in model_boxes:
+                    bbox = box.get("bbox_2d")
+                    text = box.get("text", "").strip()
+                    if not bbox or len(bbox) != 4 or not text:
+                        continue
+                    # Model bbox center in rendered-pixel space.
+                    mx0, my0, mx1, my1 = bbox
+                    mcx = ((mx0 + mx1) / 2) * mscale_x
+                    mcy = ((my0 + my1) / 2) * mscale_y
+
+                    # Snap to nearest OpenCV component (pixel-accurate position).
+                    best = None
+                    best_dist = float("inf")
+                    for (cx0, cy0, cx1, cy1) in cv_boxes:
+                        ccx = (cx0 + cx1) / 2
+                        ccy = (cy0 + cy1) / 2
+                        d = (ccx - mcx) ** 2 + (ccy - mcy) ** 2
+                        if d < best_dist:
+                            best_dist = d
+                            best = (cx0, cy0, cx1, cy1)
+
+                    if best is None:
+                        continue
+                    x0, y0, x1, y1 = best
+                    rect = pymupdf.Rect(
+                        x0 * scale_x, y0 * scale_y, x1 * scale_x, y1 * scale_y,
+                    )
+                    box_height_pt = (y1 - y0) * scale_y
+                    font_size = max(4.0, box_height_pt / line_height_ratio)
+                    escaped = _html.escape(text)
+                    color_style = "color: red;" if self.config.pipeline.overlay_debug else ""
+                    html = (
+                        f'<div style="font-family: Noto Naskh Arabic; '
+                        f'font-size: {font_size:.2f}px; direction: rtl; '
+                        f'text-align: right; {color_style}">{escaped}</div>'
+                    )
+                    new_page.insert_htmlbox(rect, html, opacity=0 if not self.config.pipeline.overlay_debug else 1)
+
+            out.save(str(out_path))
+            out.close()
+            src.close()
+            return out_path
+        except Exception as exc:
+            logger.error("BBox overlay generation failed for %s: %s", result.rel_path, exc)
+            return None

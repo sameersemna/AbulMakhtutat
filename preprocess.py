@@ -291,3 +291,68 @@ def detect_line_boxes(image_bytes: bytes) -> list[tuple[int, int, int, int]]:
     # Sort top-to-bottom.
     line_boxes.sort(key=lambda b: b[1])
     return line_boxes
+
+
+def detect_words_reading_order(image_bytes: bytes) -> list[tuple[int, int, int, int]]:
+    """Detect real word boxes in reading order (top-to-bottom, RTL within line).
+
+    Unlike `detect_word_boxes` (which returns raw connected components including
+    diacritics/dots), this filters to actual words and returns them in the order
+    a reader would read them. Used for pixel-accurate overlay alignment.
+
+    Returns a list of (x0, y0, x1, y1) boxes in reading order.
+    """
+    if not _HAS_CV2:
+        return []
+    try:
+        bgr = _pil_to_bgr(image_bytes)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Dilate to merge diacritics with their base word.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary = cv2.dilate(binary, kernel, iterations=1)
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+        h, w = binary.shape
+        # Filter to real words: drop tiny diacritics/dots and full-page artifacts.
+        min_area = 200  # px² at 300 DPI
+        min_height = 20  # px
+        words = []
+        for i in range(1, num_labels):
+            x, y, bw, bh, area = stats[i]
+            if area < min_area or bh < min_height:
+                continue
+            if bw > w * 0.9 and bh > h * 0.9:
+                continue
+            words.append((int(x), int(y), int(x + bw), int(y + bh)))
+
+        # Group into lines by vertical overlap.
+        words.sort(key=lambda b: b[1])
+        lines: list[list[tuple[int, int, int, int]]] = []
+        for box in words:
+            x0, y0, x1, y1 = box
+            bh = y1 - y0
+            placed = False
+            for line in lines:
+                ly0 = min(b[1] for b in line)
+                ly1 = max(b[3] for b in line)
+                overlap = min(y1, ly1) - max(y0, ly0)
+                if overlap > 0 and overlap >= 0.5 * min(bh, ly1 - ly0):
+                    line.append(box)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([box])
+
+        # Sort lines top-to-bottom, and words within each line right-to-left (RTL).
+        lines.sort(key=lambda l: min(b[1] for b in l))
+        result = []
+        for line in lines:
+            line.sort(key=lambda b: -b[0])  # descending x = right-to-left
+            result.extend(line)
+        return result
+    except Exception as exc:
+        logger.warning("Word reading-order detection failed: %s", exc)
+        return []

@@ -82,6 +82,16 @@ class PDFProcessor:
     def _cache_path(self, file_hash: str, page_number: int) -> Path:
         return self.config.pipeline.cache_dir / file_hash / f"page_{page_number:04d}.txt"
 
+    def _load_cached_pages(self, result: DocumentResult, file_hash: str, total_pages: int) -> None:
+        """Populate result.pages from the per-page cache (for already-completed files)."""
+        for page_number in range(1, total_pages + 1):
+            cache_path = self._cache_path(file_hash, page_number)
+            if cache_path.exists():
+                text = cache_path.read_text(encoding="utf-8")
+                result.pages.append(PageResult(page_number=page_number, text=text, model="cache"))
+            else:
+                result.pages.append(PageResult(page_number=page_number, text="", model="cache"))
+
     async def _ocr_page_cached(self, file_hash: str, page_number: int, image_bytes: bytes) -> PageResult:
         """OCR a page, using a per-page cache to avoid re-OCR on resume."""
         cache_path = self._cache_path(file_hash, page_number)
@@ -159,6 +169,9 @@ class PDFProcessor:
                 if done_pages >= real_page_count:
                     logger.info("Skipping already-completed file: %s", rel)
                     result.status = FileStatus.COMPLETED
+                    # Load cached pages so downstream consumers (e.g. overlay
+                    # generation) still have the OCR text available.
+                    self._load_cached_pages(result, fhash, result.total_pages)
                     doc.close()
                     return result
 

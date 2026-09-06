@@ -97,6 +97,22 @@ OCR TEXT:
 {text}
 """
 
+# Prompt for word-level OCR with bounding boxes. Qwen2.5-VL supports visual
+# grounding and returns `bbox_2d` coordinates in the image's pixel space.
+# Word-level boxes (like hOCR `ocrx_word`) give the tightest alignment for
+# invisible text layers — the same approach Google Books / Internet Archive use.
+_BBOX_PROMPT = """Detect all Arabic WORDS in this image. For each word, return its text and bounding box coordinates.
+
+Output a JSON array of objects, each with:
+- "bbox_2d": [x1, y1, x2, y2] — pixel coordinates of the word (top-left and bottom-right corners).
+- "text": the Arabic text of that word.
+
+Requirements:
+- Preserve all diacritical marks (Harakat).
+- Keep the original right-to-left reading order (top-to-bottom, right-to-left within a line).
+- Do NOT translate, summarize, or add commentary. Output ONLY the JSON array.
+"""
+
 
 class OCREngine:
     """Async client for Ollama vision + text post-processing.
@@ -216,6 +232,72 @@ class OCREngine:
         # All attempts failed — return empty so the caller marks the page as failed.
         logger.error("All OCR attempts failed for page (refusal persisted)")
         return "", ""
+
+    async def ocr_page_with_boxes(self, image_bytes: bytes) -> list[dict]:
+        """OCR a page and return text lines with bounding boxes.
+
+        Uses Qwen2.5-VL's visual grounding to return a list of
+        {"bbox_2d": [x1,y1,x2,y2], "text": "..."} dicts, where coordinates are
+        in the (downscaled) image's pixel space. Returns [] on failure.
+
+        This enables word/line-aligned invisible text layers in the overlay PDF.
+        """
+        import json as _json
+        import re as _re
+
+        b64 = self._prepare_image(image_bytes)
+        for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
+            try:
+                raw = await self._generate(model, _BBOX_PROMPT, images=[b64])
+                parsed = self._parse_bbox_response(raw)
+                if parsed:
+                    return parsed
+            except RuntimeError:
+                continue
+        return []
+
+    @staticmethod
+    def _parse_bbox_response(raw: str) -> list[dict]:
+        """Parse the model's bbox response into a list of {bbox_2d, text} dicts.
+
+        The model may wrap the JSON in markdown fences or prefix it with prose.
+        We extract the first JSON array of objects containing bbox_2d + text.
+        """
+        import json as _json
+        import re as _re
+
+        if not raw or not raw.strip():
+            return []
+
+        # Strip markdown code fences if present.
+        cleaned = _re.sub(r"```(?:json)?", "", raw).strip()
+
+        # Try to find a JSON array in the text.
+        # First, try parsing the whole thing as JSON.
+        try:
+            data = _json.loads(cleaned)
+            if isinstance(data, list):
+                return [d for d in data if isinstance(d, dict) and "bbox_2d" in d and "text" in d]
+        except (ValueError, TypeError):
+            pass
+
+        # Fallback: extract individual {"bbox_2d": [...], "text": "..."} objects.
+        results = []
+        # Match objects with bbox_2d and text keys (order may vary).
+        pattern = _re.compile(
+            r'\{\s*"bbox_2d"\s*:\s*\[([^\]]+)\]\s*,\s*"text"\s*:\s*"([^"]*)"\s*\}'
+            r'|\{\s*"text"\s*:\s*"([^"]*)"\s*,\s*"bbox_2d"\s*:\s*\[([^\]]+)\]\s*\}'
+        )
+        for m in pattern.finditer(raw):
+            if m.group(1) is not None:  # bbox first
+                coords = [int(float(x)) for x in m.group(1).split(",")]
+                text = m.group(2)
+            else:  # text first
+                coords = [int(float(x)) for x in m.group(4).split(",")]
+                text = m.group(3)
+            if len(coords) == 4:
+                results.append({"bbox_2d": coords, "text": text})
+        return results
 
     def _is_refusal(self, text: str) -> bool:
         """Return True if the OCR output is a refusal/failure message, not Arabic text."""

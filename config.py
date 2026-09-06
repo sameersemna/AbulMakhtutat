@@ -163,6 +163,8 @@ class PipelineConfig:
     overlay_mode: str = os.getenv("OVERLAY_MODE", "off")
     # Arabic font file used for the invisible text layer (must support Arabic).
     overlay_font: str = os.getenv("OVERLAY_FONT", "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf")
+    # Debug mode: render overlay text in RED (visible) to verify alignment.
+    overlay_debug: bool = _env_bool("OVERLAY_DEBUG", False)
 
 
 @dataclass

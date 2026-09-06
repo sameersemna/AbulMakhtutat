@@ -36,6 +36,7 @@ logger = logging.getLogger("main")
 @click.option("--preprocess", "preprocess_mode", flag_value="full", default="off", help="Enable full OpenCV preprocessing (deskew, binarize, denoise, contrast).")
 @click.option("--preprocess-light", "preprocess_mode", flag_value="light", help="Enable light preprocessing (global contrast normalization only).")
 @click.option("--overlay", "overlay_mode", flag_value="page", default="off", help="Generate a searchable overlay PDF (original scan + invisible OCR text layer).")
+@click.option("--overlay-bbox", "overlay_mode", flag_value="bbox", help="Generate overlay PDF with model-precise bounding-box alignment (most accurate).")
 @click.option("--max-pages", default=0, type=int, help="Limit pages per PDF (0 = all). Useful for testing.")
 @click.option("--only", default="", help="Process only this PDF filename (e.g. 1.pdf). Empty = all PDFs.")
 @click.option("--dry-run", is_flag=True, help="List discovered PDFs without processing.")
@@ -48,7 +49,7 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
     config.pipeline.max_pages = max_pages
     if no_postprocess:
         config.ollama.postprocess_enabled = False
-    if overlay_mode in ("page", "word"):
+    if overlay_mode in ("page", "word", "bbox"):
         config.pipeline.overlay_mode = overlay_mode
     if correct:
         config.ollama.postprocess_enabled = True
@@ -93,6 +94,10 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
                 outputs = converter.convert(result, markdown)
                 for fmt in skip:
                     outputs.pop(fmt, None)
+
+                # BBox overlay mode uses the model's grounding (async, needs engine).
+                if config.pipeline.overlay_mode == "bbox":
+                    outputs["overlay"] = await converter.write_overlay_bbox(result, processor.engine)
 
                 # Load toc entries for DB sync.
                 toc_entries = json.loads(toc_json_path.read_text(encoding="utf-8")).get("entries", [])
