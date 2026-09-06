@@ -192,3 +192,102 @@ def enhance_contrast(image_bytes: bytes) -> bytes:
     except Exception as exc:
         logger.warning("Contrast enhancement failed, using original image: %s", exc)
         return image_bytes
+
+
+def detect_word_boxes(image_bytes: bytes) -> list[tuple[int, int, int, int]]:
+    """Detect word bounding boxes in a page image via connected components.
+
+    Arabic is cursive, so each word is a single connected component. We binarize
+    the image, find connected components, and return their bounding boxes in
+    reading order (top-to-bottom, then right-to-left within each line).
+
+    Returns a list of (x0, y0, x1, y1) boxes in pixel coordinates. Returns an
+    empty list if OpenCV is unavailable or detection fails.
+    """
+    if not _HAS_CV2:
+        return []
+    try:
+        bgr = _pil_to_bgr(image_bytes)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+
+        # Binarize: text becomes white foreground on black background.
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+        # Dilate slightly to merge diacritics with their base word.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        binary = cv2.dilate(binary, kernel, iterations=1)
+
+        # Find connected components (words).
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+
+        boxes: list[tuple[int, int, int, int]] = []
+        h, w = binary.shape
+        min_area = 30  # ignore tiny specks
+        for i in range(1, num_labels):
+            x, y, bw, bh, area = stats[i]
+            if area < min_area:
+                continue
+            # Ignore components that are too large (likely borders/artifacts).
+            if bw > w * 0.9 and bh > h * 0.9:
+                continue
+            boxes.append((x, y, x + bw, y + bh))
+
+        # Sort in reading order: top-to-bottom by line, then right-to-left.
+        # Group by vertical center into lines.
+        boxes.sort(key=lambda b: (b[1], -b[0]))  # y asc, x desc (RTL)
+        return boxes
+    except Exception as exc:
+        logger.warning("Word box detection failed: %s", exc)
+        return []
+
+
+def detect_line_boxes(image_bytes: bytes) -> list[tuple[int, int, int, int]]:
+    """Detect text-line bounding boxes by grouping word boxes into lines.
+
+    Returns a list of (x0, y0, x1, y1) line boxes in top-to-bottom reading order.
+    More robust than word-level for mapping OCR text (line breaks roughly
+    correspond to visual lines). Returns [] if OpenCV is unavailable.
+    """
+    word_boxes = detect_word_boxes(image_bytes)
+    if not word_boxes:
+        return []
+
+    # Group word boxes into lines by vertical overlap of their y-ranges.
+    # Two boxes belong to the same line if their vertical ranges overlap by a
+    # meaningful amount (>= 50% of the smaller box's height).
+    boxes = sorted(word_boxes, key=lambda b: b[1])  # sort by y0
+    lines: list[list[tuple[int, int, int, int]]] = []
+
+    for box in boxes:
+        x0, y0, x1, y1 = box
+        bh = y1 - y0
+        placed = False
+        for line in lines:
+            # Compute the line's current vertical extent.
+            ly0 = min(b[1] for b in line)
+            ly1 = max(b[3] for b in line)
+            # Vertical overlap between this box and the line.
+            overlap = min(y1, ly1) - max(y0, ly0)
+            if overlap > 0 and overlap >= 0.5 * min(bh, ly1 - ly0):
+                line.append(box)
+                placed = True
+                break
+        if not placed:
+            lines.append([box])
+
+    # Merge each line's boxes into a single bounding box.
+    line_boxes = []
+    for line in lines:
+        x0 = min(b[0] for b in line)
+        y0 = min(b[1] for b in line)
+        x1 = max(b[2] for b in line)
+        y1 = max(b[3] for b in line)
+        line_boxes.append((int(x0), int(y0), int(x1), int(y1)))
+
+    # Filter out tiny boxes (diacritics/dots detected as separate lines).
+    # A real text line is at least ~30px tall at 300 DPI.
+    line_boxes = [b for b in line_boxes if (b[3] - b[1]) >= 30]
+
+    # Sort top-to-bottom.
+    line_boxes.sort(key=lambda b: b[1])
+    return line_boxes

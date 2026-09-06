@@ -175,13 +175,17 @@ class FormatConverter:
         `insert_textbox` do NOT perform Arabic contextual shaping and produce
         unsearchable `?` glyphs. The HTML path shapes Arabic correctly.
 
-        This is the "page" mode (full-page text block per page). Word-aligned
-        placement requires bounding boxes from the OCR step (future work).
+        Two modes:
+          - "page": full-page text block per page (approximate alignment).
+          - "word": line-aligned placement using OpenCV-detected text-line boxes
+            (closer spatial alignment to the scan).
         """
         import html as _html
         import re
 
         import pymupdf
+
+        from preprocess import detect_line_boxes
 
         mode = self.config.pipeline.overlay_mode
         if mode == "off":
@@ -222,19 +226,10 @@ class FormatConverter:
                 if not clean.strip():
                     continue
 
-                # Escape for HTML and preserve line breaks.
-                escaped = _html.escape(clean).replace("\n", "<br>")
-                html = (
-                    f'<div style="font-family: Noto Naskh Arabic; '
-                    f'font-size: 9px; opacity: 0; direction: rtl; '
-                    f'text-align: right;">{escaped}</div>'
-                )
-                margin = 20
-                rect = pymupdf.Rect(
-                    margin, margin,
-                    new_page.rect.width - margin, new_page.rect.height - margin,
-                )
-                new_page.insert_htmlbox(rect, html)
+                if mode == "word":
+                    self._overlay_word_aligned(new_page, clean, img_bytes, _html)
+                else:
+                    self._overlay_full_page(new_page, clean, _html)
 
             out.save(str(out_path))
             out.close()
@@ -243,6 +238,62 @@ class FormatConverter:
         except Exception as exc:
             logger.error("Overlay PDF generation failed for %s: %s", result.rel_path, exc)
             return None
+
+    def _overlay_full_page(self, page, clean: str, _html) -> None:
+        """Overlay the full page text as a single invisible block."""
+        import pymupdf
+
+        escaped = _html.escape(clean).replace("\n", "<br>")
+        html = (
+            f'<div style="font-family: Noto Naskh Arabic; '
+            f'font-size: 9px; opacity: 0; direction: rtl; '
+            f'text-align: right;">{escaped}</div>'
+        )
+        margin = 20
+        rect = pymupdf.Rect(
+            margin, margin,
+            page.rect.width - margin, page.rect.height - margin,
+        )
+        page.insert_htmlbox(rect, html)
+
+    def _overlay_word_aligned(self, page, clean: str, img_bytes: bytes, _html) -> None:
+        """Overlay text line-by-line, aligned to OpenCV-detected text-line boxes."""
+        import pymupdf
+
+        from preprocess import detect_line_boxes
+
+        # Detect text-line boxes from the rendered page image.
+        line_boxes = detect_line_boxes(img_bytes)
+        lines = [l for l in clean.splitlines() if l.strip()]
+
+        if not line_boxes or not lines:
+            # Fall back to full-page if detection failed.
+            self._overlay_full_page(page, clean, _html)
+            return
+
+        # Map OCR lines onto detected line boxes (top-to-bottom).
+        # If counts differ, fall back to full-page (safer than misalignment).
+        if len(line_boxes) < len(lines):
+            self._overlay_full_page(page, clean, _html)
+            return
+
+        # The rendered image is at `dpi` zoom; convert pixel coords to PDF points.
+        zoom = self.config.pipeline.dpi / 72.0
+        for i, line in enumerate(lines):
+            if i >= len(line_boxes):
+                break
+            x0, y0, x1, y1 = line_boxes[i]
+            # Convert pixel coords (at dpi) to PDF points.
+            rect = pymupdf.Rect(
+                x0 / zoom, y0 / zoom, x1 / zoom, y1 / zoom,
+            )
+            escaped = _html.escape(line)
+            html = (
+                f'<div style="font-family: Noto Naskh Arabic; '
+                f'font-size: 9px; opacity: 0; direction: rtl; '
+                f'text-align: right;">{escaped}</div>'
+            )
+            page.insert_htmlbox(rect, html)
 
     @staticmethod
     def _strip_markdown(text: str) -> str:
