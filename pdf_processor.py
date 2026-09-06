@@ -19,6 +19,7 @@ from config import Config, get_config
 from models import DocumentResult, FileStatus, PageResult
 from ocr_engine import OCREngine
 from state_tracker import StateTracker
+from text_cleanup import cleanup_text
 from thermal import ThermalGuard
 
 logger = logging.getLogger(__name__)
@@ -98,6 +99,8 @@ class PDFProcessor:
             await self.thermal.wait_if_hot()
             raw, model = await self.engine.ocr_page(image_bytes)
             text = await self.engine.postprocess(raw)
+            # Clean up page numbers and running headers.
+            text = cleanup_text(text, self.config.pipeline.running_header)
             duration_ms = int((time.monotonic() - start) * 1000)
             quality = self.engine.quality_score(text)
             if not text.strip():

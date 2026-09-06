@@ -153,6 +153,8 @@ class PipelineConfig:
     # RTL / typography
     rtl: bool = _env_bool("OCR_RTL", True)
     font_family: str = os.getenv("OCR_FONT_FAMILY", "'Amiri', 'Traditional Arabic', 'Scheherazade New', serif")
+    # Running header (book title) repeated on every page — stripped from output.
+    running_header: str = os.getenv("OCR_RUNNING_HEADER", "")
     # Calibre ebook-convert binary (for MOBI). Empty = auto-detect via PATH.
     ebook_convert: str = os.getenv("EBOOK_CONVERT", "")
     # Searchable PDF overlay: generate `{stem}_overlay.pdf` with the original scan

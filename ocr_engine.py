@@ -52,6 +52,25 @@ _REFUSAL_PHRASES = (
     "provide it for accurate",
 )
 
+# Arabic refusal phrases — the model sometimes refuses in Arabic instead of
+# English (e.g. "لا يوجد نص قابل للقراءة في هذه الصفحة").
+_ARABIC_REFUSAL_PHRASES = (
+    "لا يوجد نص",
+    "لا يوجد نص قابل للقراءة",
+    "غير قابل للقراءة",
+    "لا يمكن قراءة",
+    "لا يمكن التعرف",
+    "نص فارغ",
+    "صفحة فارغة",
+    "لا توجد كتابة",
+    "لا يوجد محتوى",
+    "لا يمكن نسخ",
+    "لا يمكن استخراج",
+    "الصورة غير واضحة",
+    "النص غير مقروء",
+    "لا يوجد نص عربي",
+)
+
 _VISION_PROMPT = """You are an expert Arabic OCR engine. Transcribe the Arabic text in this page image EXACTLY as it appears.
 
 Requirements:
@@ -203,8 +222,11 @@ class OCREngine:
         if not text or not text.strip():
             return True
         lowered = text.lower()
-        # If the response contains any refusal phrase, treat it as a failure.
+        # If the response contains any English refusal phrase, treat it as a failure.
         if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
+            return True
+        # If the response contains any Arabic refusal phrase, treat it as a failure.
+        if any(phrase in text for phrase in _ARABIC_REFUSAL_PHRASES):
             return True
         # If there is essentially no Arabic content, treat as failure.
         arabic_chars = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
