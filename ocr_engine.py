@@ -113,6 +113,21 @@ Requirements:
 - Do NOT translate, summarize, or add commentary. Output ONLY the JSON array.
 """
 
+# Prompt for LINE-level OCR with bounding boxes. Line boxes are more accurate
+# than word boxes for Arabic (the model detects line boundaries reliably, while
+# word boundaries are unreliable due to cursive script + diacritics).
+_LINE_BBOX_PROMPT = """Detect all Arabic text LINES in this image. For each line, return its full text and bounding box coordinates.
+
+Output a JSON array of objects, each with:
+- "bbox_2d": [x1, y1, x2, y2] — pixel coordinates of the line (top-left and bottom-right corners).
+- "text": the full Arabic text of that line.
+
+Requirements:
+- Preserve all diacritical marks (Harakat).
+- Keep the original top-to-bottom reading order.
+- Do NOT translate, summarize, or add commentary. Output ONLY the JSON array.
+"""
+
 
 class OCREngine:
     """Async client for Ollama vision + text post-processing.
@@ -249,6 +264,25 @@ class OCREngine:
         for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
             try:
                 raw = await self._generate(model, _BBOX_PROMPT, images=[b64])
+                parsed = self._parse_bbox_response(raw)
+                if parsed:
+                    return parsed
+            except RuntimeError:
+                continue
+        return []
+
+    async def ocr_page_with_line_boxes(self, image_bytes: bytes) -> list[dict]:
+        """OCR a page and return text LINES with bounding boxes.
+
+        Line boxes are more accurate than word boxes for Arabic (the model
+        detects line boundaries reliably, while word boundaries are unreliable
+        due to cursive script + diacritics). Returns a list of
+        {"bbox_2d": [x1,y1,x2,y2], "text": "..."} in downscaled pixel space.
+        """
+        b64 = self._prepare_image(image_bytes)
+        for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
+            try:
+                raw = await self._generate(model, _LINE_BBOX_PROMPT, images=[b64])
                 parsed = self._parse_bbox_response(raw)
                 if parsed:
                     return parsed

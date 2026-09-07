@@ -45,13 +45,52 @@ def _file_hash(path: Path) -> str:
     return h.hexdigest()
 
 
-def _render_page(doc: pymupdf.Document, page_number: int, dpi: int) -> bytes:
-    """Render a single page to PNG bytes at the given DPI."""
+def _render_page(doc: pymupdf.Document, page_number: int, dpi: int, config=None) -> bytes:
+    """Render a single page to PNG bytes at the given DPI.
+
+    If preprocessing is enabled in config, applies it to the rendered image so
+    the vision OCR model sees a clean, binarized page (black text on white
+    background) — this improves accuracy on pixelated scans and poor paper.
+    """
     page = doc[page_number - 1]
     zoom = dpi / 72.0
     mat = pymupdf.Matrix(zoom, zoom)
     pix = page.get_pixmap(matrix=mat, alpha=False)
-    return pix.tobytes("png")
+    img_bytes = pix.tobytes("png")
+
+    if config is not None:
+        from preprocess import preprocess
+        img_bytes = preprocess(img_bytes, config)
+    return img_bytes
+
+
+def parse_page_range(spec: str, total_pages: int) -> list[int]:
+    """Parse a page-range spec like '31-35' or '1,3,5-7' into a sorted list.
+
+    Returns [] if spec is empty (meaning all pages). Clamps to [1, total_pages].
+    """
+    if not spec or not spec.strip():
+        return []
+    pages: set[int] = set()
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            try:
+                lo, hi = int(a), int(b)
+            except ValueError:
+                continue
+            if lo > hi:
+                lo, hi = hi, lo
+            pages.update(range(max(1, lo), min(total_pages, hi) + 1))
+        else:
+            try:
+                pages.add(int(part))
+            except ValueError:
+                continue
+    return sorted(p for p in pages if 1 <= p <= total_pages)
 
 
 class PDFProcessor:
@@ -84,7 +123,11 @@ class PDFProcessor:
 
     def _load_cached_pages(self, result: DocumentResult, file_hash: str, total_pages: int) -> None:
         """Populate result.pages from the per-page cache (for already-completed files)."""
-        for page_number in range(1, total_pages + 1):
+        if result.page_filter:
+            target_pages = result.page_filter
+        else:
+            target_pages = range(1, total_pages + 1)
+        for page_number in target_pages:
             cache_path = self._cache_path(file_hash, page_number)
             if cache_path.exists():
                 text = cache_path.read_text(encoding="utf-8")
@@ -162,6 +205,12 @@ class PDFProcessor:
             if self.config.pipeline.max_pages > 0:
                 result.total_pages = min(real_page_count, self.config.pipeline.max_pages)
 
+            # Optional page-range filter (e.g. "31-35") to focus on main text.
+            page_filter = parse_page_range(self.config.pipeline.pages, result.total_pages)
+            if page_filter:
+                result.total_pages = len(page_filter)
+                result.page_filter = page_filter
+
             # Idempotency: skip only if the full document was already completed.
             if self.state.is_completed(fhash):
                 state = self.state.get(fhash) or {}
@@ -179,7 +228,12 @@ class PDFProcessor:
             completed = self.state.completed_pages(fhash)
 
             # Pages that still need OCR (not yet cached/completed).
-            pending = [pn for pn in range(1, result.total_pages + 1) if pn not in completed]
+            # If a page filter is set, only process those physical pages.
+            if page_filter:
+                target_pages = page_filter
+            else:
+                target_pages = list(range(1, result.total_pages + 1))
+            pending = [pn for pn in target_pages if pn not in completed]
 
             if pending:
                 # Estimate duration: ~10s/page for the vision model, divided by workers.
@@ -204,7 +258,7 @@ class PDFProcessor:
                 nonlocal done_count
                 async with sem:
                     # Render lazily, just before OCR, to avoid holding all pages in memory.
-                    image_bytes = _render_page(doc, page_number, self.config.pipeline.dpi)
+                    image_bytes = _render_page(doc, page_number, self.config.pipeline.dpi, self.config)
                     result_page = await self._ocr_page_cached(fhash, page_number, image_bytes)
                     done_count += 1
                     elapsed = time.monotonic() - start_time
@@ -220,9 +274,9 @@ class PDFProcessor:
             # Process pending pages with bounded concurrency, preserving order.
             page_results = await asyncio.gather(*(_process_one(pn) for pn in pending))
 
-            # Merge cached + freshly OCR'd pages in order.
+            # Merge cached + freshly OCR'd pages in order (respecting page filter).
             page_map = {p.page_number: p for p in page_results}
-            for page_number in range(1, result.total_pages + 1):
+            for page_number in target_pages:
                 if page_number in page_map:
                     result.pages.append(page_map[page_number])
                 else:

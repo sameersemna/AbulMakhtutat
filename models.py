@@ -42,6 +42,9 @@ class DocumentResult:
     pages: list[PageResult] = field(default_factory=list)
     status: FileStatus = FileStatus.PENDING
     error: str | None = None
+    # Optional list of physical page numbers to process (e.g. [31,32,33,34,35]).
+    # When set, only these pages are OCR'd and overlaid. Empty = all pages.
+    page_filter: list[int] = field(default_factory=list)
 
     @property
     def markdown(self) -> str:

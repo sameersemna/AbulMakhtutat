@@ -37,19 +37,22 @@ logger = logging.getLogger("main")
 @click.option("--preprocess-light", "preprocess_mode", flag_value="light", help="Enable light preprocessing (global contrast normalization only).")
 @click.option("--overlay", "overlay_mode", flag_value="page", default="off", help="Generate a searchable overlay PDF (original scan + invisible OCR text layer).")
 @click.option("--overlay-bbox", "overlay_mode", flag_value="bbox", help="Generate overlay PDF with model-precise bounding-box alignment (most accurate).")
+@click.option("--overlay-line", "overlay_mode", flag_value="line", help="Generate overlay PDF with line-level alignment (robust for Arabic).")
 @click.option("--max-pages", default=0, type=int, help="Limit pages per PDF (0 = all). Useful for testing.")
+@click.option("--pages", default="", help="Page range to process, e.g. '31-35' or '1,3,5-7'. Empty = all pages. Useful for focusing on main text.")
 @click.option("--only", default="", help="Process only this PDF filename (e.g. 1.pdf). Empty = all PDFs.")
 @click.option("--dry-run", is_flag=True, help="List discovered PDFs without processing.")
-def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, correct: bool, preprocess_mode: str, overlay_mode: str, max_pages: int, only: str, dry_run: bool) -> None:
+def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats: str, no_postprocess: bool, correct: bool, preprocess_mode: str, overlay_mode: str, max_pages: int, pages: str, only: str, dry_run: bool) -> None:
     config = get_config()
     config.pipeline.input_dir = input_dir
     config.pipeline.output_dir = output_dir
     config.pipeline.workers = workers
     config.pipeline.dpi = dpi
     config.pipeline.max_pages = max_pages
+    config.pipeline.pages = pages
     if no_postprocess:
         config.ollama.postprocess_enabled = False
-    if overlay_mode in ("page", "word", "bbox"):
+    if overlay_mode in ("page", "word", "bbox", "line"):
         config.pipeline.overlay_mode = overlay_mode
     if correct:
         config.ollama.postprocess_enabled = True
@@ -95,9 +98,11 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
                 for fmt in skip:
                     outputs.pop(fmt, None)
 
-                # BBox overlay mode uses the model's grounding (async, needs engine).
+                # BBox/line overlay modes use the model's grounding (async, needs engine).
                 if config.pipeline.overlay_mode == "bbox":
                     outputs["overlay"] = await converter.write_overlay_bbox(result, processor.engine)
+                elif config.pipeline.overlay_mode == "line":
+                    outputs["overlay"] = await converter.write_overlay_line(result, processor.engine, thermal=processor.thermal)
 
                 # Load toc entries for DB sync.
                 toc_entries = json.loads(toc_json_path.read_text(encoding="utf-8")).get("entries", [])

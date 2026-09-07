@@ -141,6 +141,9 @@ class PipelineConfig:
     dpi: int = _env_int("OCR_DPI", 300)
     workers: int = _env_int("OCR_WORKERS", 1)  # default 1 to avoid GPU overload
     max_pages: int = _env_int("OCR_MAX_PAGES", 0)  # 0 = all pages
+    # Page range to process, e.g. "31-35" or "1,3,5-7". Empty = all pages.
+    # Useful for focusing on the main text and skipping cover/intro pages.
+    pages: str = os.getenv("OCR_PAGES", "")
     # OpenCV preprocessing (applied before vision OCR)
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     # GPU thermal throttling
@@ -165,6 +168,14 @@ class PipelineConfig:
     overlay_font: str = os.getenv("OVERLAY_FONT", "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf")
     # Debug mode: render overlay text in RED (visible) to verify alignment.
     overlay_debug: bool = _env_bool("OVERLAY_DEBUG", False)
+    # Use Surya (best Arabic line detection, mAP 79.67%) for overlay line boxes
+    # instead of OpenCV. Runs on GPU by default (thermal guard gates inference).
+    overlay_use_surya: bool = _env_bool("OVERLAY_USE_SURYA", True)
+    # Detection engine for overlay line boxes: "surya" (default, best line
+    # detection) | "easyocr" (best Arabic recognition) | "opencv" (fallback).
+    overlay_detector: str = os.getenv("OVERLAY_DETECTOR", "surya")
+    # Device for Surya/EasyOCR detection: "cuda" (default, fast) or "cpu".
+    overlay_device: str = os.getenv("OVERLAY_DEVICE", "cuda")
 
 
 @dataclass
