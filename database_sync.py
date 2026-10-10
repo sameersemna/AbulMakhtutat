@@ -17,6 +17,7 @@ from typing import Any
 
 from config import Config, get_config
 from models import DocumentResult
+from text_cleanup import normalize_arabic
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,19 @@ class DatabaseSync:
 
     def __init__(self, config: Config | None = None):
         self.config = config or get_config()
+
+    def _search_text(self, text: str) -> str:
+        """Return the copy of `text` to index for search/RAG.
+
+        When `pipeline.normalize_search` is enabled (opt-in, default off), Arabic
+        is folded (NFC, base letters, digits, diacritics stripped) so that search
+        matches across orthographic variants and diacritics. This affects ONLY the
+        indexed copy — the canonical Markdown output is never normalized. Enabling
+        it changes the indexed/embedded text, so reindex existing data.
+        """
+        if self.config.pipeline.normalize_search:
+            return normalize_arabic(text)
+        return text
 
     # ---- PostgreSQL -------------------------------------------------------
     def _sync_postgres(self, result: DocumentResult, toc: list[dict[str, Any]]) -> None:
@@ -118,7 +132,7 @@ class DatabaseSync:
                     body={
                         "rel_path": result.rel_path,
                         "page": page.page_number,
-                        "text": page.text,
+                        "text": self._search_text(page.text),
                     },
                 )
             logger.info("Elasticsearch: indexed %s", result.rel_path)
@@ -144,7 +158,8 @@ class DatabaseSync:
             for page in result.pages:
                 if page.error or not page.text.strip():
                     continue
-                vec = await engine.embed(page.text[:2000])
+                index_text = self._search_text(page.text[:2000])
+                vec = await engine.embed(index_text)
                 points.append(
                     {
                         "id": f"{result.file_hash[:16]}-{page.page_number}",
@@ -152,7 +167,7 @@ class DatabaseSync:
                         "payload": {
                             "rel_path": result.rel_path,
                             "page": page.page_number,
-                            "text": page.text[:2000],
+                            "text": index_text,
                         },
                     }
                 )

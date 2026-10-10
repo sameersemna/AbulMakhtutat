@@ -1,0 +1,3 @@
+# Ground truth for the Arabic OCR probe set.
+# Files here are hand-corrected reference text, one per manifest entry (<id>.txt),
+# seeded via `python eval_ocr.py --export-templates`.

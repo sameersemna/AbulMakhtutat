@@ -20,7 +20,7 @@ import click
 import pymupdf
 
 from config import get_config
-from ocr_engine import OCREngine
+from hf_vlm_engine import build_ocr_engine
 from thermal import ThermalGuard
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -38,13 +38,14 @@ def _render(doc: pymupdf.Document, page_number: int, dpi: int) -> bytes:
 @click.option("--pdf", required=True, type=click.Path(path_type=Path), help="Input PDF.")
 @click.option("--pages", default="3,4,5", help="Comma-separated page numbers to test.")
 @click.option("--out", default="./ab_test_results", type=click.Path(path_type=Path), help="Output directory.")
-def main(pdf: Path, pages: str, out: Path) -> None:
+@click.option("--mode", default="full", type=click.Choice(["light", "full", "sharpen"]), help="Preprocessing variant to A/B against baseline (off).")
+def main(pdf: Path, pages: str, out: Path, mode: str) -> None:
     page_numbers = [int(x) for x in pages.split(",") if x.strip()]
     out.mkdir(parents=True, exist_ok=True)
 
     config = get_config()
     config.pipeline.workers = 1  # single worker to avoid GPU overload
-    engine = OCREngine(config)
+    engine = build_ocr_engine(config)
     thermal = ThermalGuard(config)
 
     async def run() -> None:
@@ -55,16 +56,19 @@ def main(pdf: Path, pages: str, out: Path) -> None:
 
             # Baseline: preprocessing OFF
             config.pipeline.preprocess.enabled = False
+            config.pipeline.preprocess.mode = "off"
             await thermal.wait_if_hot()
             text_off, model_off = await engine.ocr_page(img)
 
-            # Variant: preprocessing ON
+            # Variant: preprocessing ON in the requested mode
             config.pipeline.preprocess.enabled = True
+            config.pipeline.preprocess.mode = mode
             await thermal.wait_if_hot()
             text_on, model_on = await engine.ocr_page(img)
 
             entry = {
                 "page": pn,
+                "mode": mode,
                 "baseline_model": model_off,
                 "preprocess_model": model_on,
                 "baseline_chars": len(text_off),
@@ -74,11 +78,11 @@ def main(pdf: Path, pages: str, out: Path) -> None:
 
             # Write side-by-side text files for manual diff.
             (out / f"page_{pn:04d}_baseline.md").write_text(text_off, encoding="utf-8")
-            (out / f"page_{pn:04d}_preprocessed.md").write_text(text_on, encoding="utf-8")
+            (out / f"page_{pn:04d}_{mode}.md").write_text(text_on, encoding="utf-8")
 
             logger.info(
-                "page %d: baseline=%d chars (%s), preprocessed=%d chars (%s)",
-                pn, len(text_off), model_off, len(text_on), model_on,
+                "page %d: baseline=%d chars (%s), %s=%d chars (%s)",
+                pn, len(text_off), model_off, mode, len(text_on), model_on,
             )
 
         (out / "summary.json").write_text(

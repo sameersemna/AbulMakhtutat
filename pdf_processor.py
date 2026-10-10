@@ -17,7 +17,7 @@ import pymupdf
 
 from config import Config, get_config
 from models import DocumentResult, FileStatus, PageResult
-from ocr_engine import OCREngine
+from hf_vlm_engine import build_ocr_engine
 from state_tracker import StateTracker
 from text_cleanup import cleanup_text
 from thermal import ThermalGuard
@@ -98,7 +98,7 @@ class PDFProcessor:
 
     def __init__(self, config: Config | None = None):
         self.config = config or get_config()
-        self.engine = OCREngine(self.config)
+        self.engine = build_ocr_engine(self.config)
         self.state = StateTracker(self.config)
         self.thermal = ThermalGuard(self.config)
         self._semaphore: asyncio.Semaphore | None = None
@@ -135,22 +135,38 @@ class PDFProcessor:
             else:
                 result.pages.append(PageResult(page_number=page_number, text="", model="cache"))
 
-    async def _ocr_page_cached(self, file_hash: str, page_number: int, image_bytes: bytes) -> PageResult:
-        """OCR a page, using a per-page cache to avoid re-OCR on resume."""
+    def _cached_page_result(self, file_hash: str, page_number: int) -> PageResult | None:
+        """Return a usable cached PageResult, else None.
+
+        A cached refusal/failure message is discarded (returns None) so the page is
+        re-OCR'd. Shared by `_process_one` (to skip rendering on cache hits) and
+        `_ocr_page_cached`.
+        """
+        if not self.config.pipeline.use_cache:
+            return None
         cache_path = self._cache_path(file_hash, page_number)
-        if self.config.pipeline.use_cache and cache_path.exists():
-            text = cache_path.read_text(encoding="utf-8")
-            # If the cached text is a refusal/failure message (from an older run),
-            # discard it and re-OCR so we don't keep the failure prose.
-            if not self.engine.is_refusal(text):
-                return PageResult(page_number=page_number, text=text, model="cache")
+        if not cache_path.exists():
+            return None
+        text = cache_path.read_text(encoding="utf-8")
+        if self.engine.is_refusal(text):
             logger.warning("Cached page %d contains a refusal message; re-OCRing", page_number)
+            return None
+        return PageResult(page_number=page_number, text=text, model="cache")
+
+    async def _ocr_page_cached(self, file_hash: str, page_number: int, image_bytes: bytes, max_dim: int | None = None) -> PageResult:
+        """OCR a page, using a per-page cache to avoid re-OCR on resume.
+
+        `max_dim` is forwarded to the vision engine (larger cap for heavy pages).
+        """
+        cached = self._cached_page_result(file_hash, page_number)
+        if cached is not None:
+            return cached
 
         start = time.monotonic()
         try:
             # Wait for the GPU to cool before starting this page's inference.
             await self.thermal.wait_if_hot()
-            raw, model = await self.engine.ocr_page(image_bytes)
+            raw, model = await self.engine.ocr_page(image_bytes, max_dim=max_dim)
             text = await self.engine.postprocess(raw)
             # Clean up page numbers and running headers.
             text = cleanup_text(text, self.config.pipeline.running_header)
@@ -257,9 +273,29 @@ class PDFProcessor:
             async def _process_one(page_number: int) -> PageResult:
                 nonlocal done_count
                 async with sem:
-                    # Render lazily, just before OCR, to avoid holding all pages in memory.
-                    image_bytes = _render_page(doc, page_number, self.config.pipeline.dpi, self.config)
-                    result_page = await self._ocr_page_cached(fhash, page_number, image_bytes)
+                    # Skip rendering entirely when the page is already cached.
+                    result_page = self._cached_page_result(fhash, page_number)
+                    if result_page is None:
+                        # Render lazily, just before OCR, to avoid holding all pages in memory.
+                        dpi = self.config.pipeline.dpi
+                        image_bytes = _render_page(doc, page_number, dpi, self.config)
+                        max_dim: int | None = None
+                        # Optional: re-render diacritized / small-text pages at a higher
+                        # DPI and a larger vision-model cap so diacritics survive
+                        # downscaling. Off by default (base behaviour unchanged).
+                        if self.config.pipeline.heavy_heuristic:
+                            from preprocess import score_diacritic_density
+
+                            score = score_diacritic_density(image_bytes)
+                            if score >= self.config.pipeline.heavy_threshold:
+                                dpi = self.config.pipeline.dpi_heavy
+                                image_bytes = _render_page(doc, page_number, dpi, self.config)
+                                max_dim = self.config.ollama.max_image_dim_heavy
+                                logger.info(
+                                    "  page %d: heavy page (diacritic score %.2f) -> DPI %d, image cap %d",
+                                    page_number, score, dpi, max_dim,
+                                )
+                        result_page = await self._ocr_page_cached(fhash, page_number, image_bytes, max_dim=max_dim)
                     done_count += 1
                     elapsed = time.monotonic() - start_time
                     rate = done_count / elapsed if elapsed > 0 else 0.0

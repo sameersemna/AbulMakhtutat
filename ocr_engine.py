@@ -15,10 +15,9 @@ import time
 from typing import Any
 
 import httpx
-from PIL import Image
 
 from config import Config, get_config
-from preprocess import enhance_contrast, preprocess
+from preprocess import enhance_contrast, prepare_page_image, sharpen_image
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +128,50 @@ Requirements:
 """
 
 
+def is_refusal_text(text: str) -> bool:
+    """Return True if OCR output is a refusal/failure message, not Arabic text.
+
+    Shared by all vision backends (Ollama, HuggingFace) so refusal handling is
+    identical regardless of engine.
+    """
+    if not text or not text.strip():
+        return True
+    lowered = text.lower()
+    # English refusal phrases.
+    if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
+        return True
+    # Arabic refusal phrases.
+    if any(phrase in text for phrase in _ARABIC_REFUSAL_PHRASES):
+        return True
+    # Essentially no Arabic content => failure.
+    arabic_chars = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+    return arabic_chars < 3
+
+
+def quality_score_text(text: str) -> float:
+    """Heuristic confidence score for OCR output (0.0 = bad, 1.0 = good).
+
+    Vision-LLMs don't emit native confidence, so approximate it with signal-based
+    heuristics (grounded in arXiv 2409.04117): Arabic character ratio (vs. Latin
+    garbage / refusal prose), refusal phrases, and a Latin-content penalty.
+    """
+    if not text or not text.strip():
+        return 0.0
+    lowered = text.lower()
+    if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
+        return 0.0
+
+    total = len(text)
+    arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
+    latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
+    arabic_ratio = arabic / total if total else 0.0
+    latin_ratio = latin / total if total else 0.0
+
+    score = arabic_ratio * 0.7  # dominant signal
+    score -= latin_ratio * 0.3  # penalty for Latin garbage
+    return round(max(0.0, min(1.0, score)), 3)
+
+
 class OCREngine:
     """Async client for Ollama vision + text post-processing.
 
@@ -209,15 +252,19 @@ class OCREngine:
                 return await _call()
         return await _call()
 
-    async def ocr_page(self, image_bytes: bytes) -> tuple[str, str]:
+    async def ocr_page(self, image_bytes: bytes, max_dim: int | None = None) -> tuple[str, str]:
         """OCR a single page image. Returns (text, model_used).
+
+        `max_dim` overrides the vision model's long-edge downscale for this call
+        (e.g. a larger cap for diacritized "heavy" pages); None uses the config
+        default so existing callers are unaffected.
 
         Detects refusal/failure responses (e.g. "image is overexposed") and
         retries with contrast enhancement, then falls back to the secondary
         model. Returns ("", "") if all attempts fail, so the failure prose is
         never stored as valid OCR output.
         """
-        b64 = self._prepare_image(image_bytes)
+        b64 = self._prepare_image(image_bytes, max_dim)
 
         # Attempt 1: primary model, original image.
         for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
@@ -233,16 +280,28 @@ class OCREngine:
                     continue
                 raise
 
-        # Attempt 2: contrast-enhanced image (fixes "washed out" pages).
-        enhanced_b64 = self._prepare_image(enhance_contrast(image_bytes))
-        for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
-            try:
-                text = await self._generate(model, _VISION_PROMPT, images=[enhanced_b64])
-                if not self._is_refusal(text):
-                    logger.info("Recovered page via contrast enhancement using %s", model)
-                    return text, model
-            except RuntimeError:
-                continue
+        # Attempt 2: retry with an image transform (contrast and/or sharpening).
+        # Sharpening is preferred for vision LLMs (arXiv 2608.22366). The default
+        # mode "contrast" preserves the original single-transform behaviour.
+        mode = self.config.ollama.retry_mode.lower()
+        transforms: list[tuple[str, object]] = []
+        if mode in ("contrast", "both"):
+            transforms.append(("contrast", enhance_contrast))
+        if mode in ("sharpen", "both"):
+            transforms.append(("sharpen", sharpen_image))
+        if not transforms:
+            transforms.append(("contrast", enhance_contrast))
+
+        for label, transform in transforms:
+            retry_b64 = self._prepare_image(transform(image_bytes), max_dim)  # type: ignore[operator]
+            for model in (self.config.ollama.vision_model, self.config.ollama.vision_fallback):
+                try:
+                    text = await self._generate(model, _VISION_PROMPT, images=[retry_b64])
+                    if not self._is_refusal(text):
+                        logger.info("Recovered page via %s enhancement using %s", label, model)
+                        return text, model
+                except RuntimeError:
+                    continue
 
         # All attempts failed — return empty so the caller marks the page as failed.
         logger.error("All OCR attempts failed for page (refusal persisted)")
@@ -335,72 +394,31 @@ class OCREngine:
 
     def _is_refusal(self, text: str) -> bool:
         """Return True if the OCR output is a refusal/failure message, not Arabic text."""
-        if not text or not text.strip():
-            return True
-        lowered = text.lower()
-        # If the response contains any English refusal phrase, treat it as a failure.
-        if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
-            return True
-        # If the response contains any Arabic refusal phrase, treat it as a failure.
-        if any(phrase in text for phrase in _ARABIC_REFUSAL_PHRASES):
-            return True
-        # If there is essentially no Arabic content, treat as failure.
-        arabic_chars = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
-        if arabic_chars < 3:
-            return True
-        return False
+        return is_refusal_text(text)
 
     def is_refusal(self, text: str) -> bool:
         """Public wrapper for refusal detection (used by the processor)."""
-        return self._is_refusal(text)
+        return is_refusal_text(text)
 
     def quality_score(self, text: str) -> float:
-        """Heuristic confidence score for OCR output (0.0 = bad, 1.0 = good).
+        """Heuristic confidence score for OCR output (0.0 = bad, 1.0 = good)."""
+        return quality_score_text(text)
 
-        Vision-LLMs don't emit native confidence, so we approximate it with
-        signal-based heuristics (grounded in arXiv 2409.04117, which shows
-        confidence signals dramatically improve OCR error detection):
-          - Arabic character ratio (vs. Latin garbage / refusal prose)
-          - Presence of refusal phrases
-          - Length vs. expected page density
+    def _prepare_image(self, image_bytes: bytes, max_dim: int | None = None) -> str:
+        """Preprocess (optional), downscale, and base64-encode the page image.
+
+        `max_dim` overrides `config.ollama.max_image_dim` when provided; None uses
+        the config default. A value of 0 disables downscaling for the call. Uses the
+        shared `prepare_page_image` so every backend sees an identical image.
         """
-        if not text or not text.strip():
-            return 0.0
-        lowered = text.lower()
-        if any(phrase in lowered for phrase in _REFUSAL_PHRASES):
-            return 0.0
-
-        total = len(text)
-        arabic = sum(1 for ch in text if "\u0600" <= ch <= "\u06FF")
-        # Latin letters (potential OCR garbage / mixed-script noise).
-        latin = sum(1 for ch in text if "a" <= ch.lower() <= "z")
-
-        # Arabic ratio: high = good. Penalize heavy Latin content.
-        arabic_ratio = arabic / total if total else 0.0
-        latin_ratio = latin / total if total else 0.0
-
-        score = arabic_ratio * 0.7  # dominant signal
-        score -= latin_ratio * 0.3  # penalty for Latin garbage
-        score = max(0.0, min(1.0, score))
-        return round(score, 3)
-
-    def _prepare_image(self, image_bytes: bytes) -> str:
-        """Preprocess (optional) and downscale the page image, then base64-encode."""
-        # Optional OpenCV preprocessing (deskew, binarize, denoise, contrast).
-        image_bytes = preprocess(image_bytes, self.config)
-
-        max_dim = self.config.ollama.max_image_dim
-        if max_dim and max_dim > 0:
-            try:
-                im = Image.open(io.BytesIO(image_bytes))
-                if max(im.size) > max_dim:
-                    im.thumbnail((max_dim, max_dim))
-                    buf = io.BytesIO()
-                    im.save(buf, format="PNG")
-                    image_bytes = buf.getvalue()
-            except Exception as exc:
-                logger.warning("Image downscale failed, using original: %s", exc)
-        return base64.b64encode(image_bytes).decode("ascii")
+        try:
+            im = prepare_page_image(image_bytes, self.config, max_dim)
+            buf = io.BytesIO()
+            im.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode("ascii")
+        except Exception as exc:
+            logger.warning("Image prepare failed, using original bytes: %s", exc)
+            return base64.b64encode(image_bytes).decode("ascii")
 
     async def postprocess(self, text: str) -> str:
         """Clean OCR text with the post-processing model (optional)."""

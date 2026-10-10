@@ -121,6 +121,38 @@ def _light_contrast(bgr: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
 
 
+def _sharpen(bgr: np.ndarray) -> np.ndarray:
+    """Mild unsharp mask to recover faint strokes for vision-LLM OCR.
+
+    Evidence (arXiv 2608.22366) shows sharpening is the one preprocessing
+    operation that *improved* VLM Arabic recognition, whereas binarization,
+    denoising and contrast enhancement all degraded it. Dimension-preserving,
+    so the raw->preprocessed coordinate mapping used by the overlay stays intact.
+    """
+    blurred = cv2.GaussianBlur(bgr, (0, 0), sigmaX=1.0)
+    return cv2.addWeighted(bgr, 1.5, blurred, -0.5, 0)
+
+
+def prepare_page_image(
+    image_bytes: bytes, config: Config | None = None, max_dim: int | None = None
+) -> Image.Image:
+    """Preprocess (optional), downscale to `max_dim`, and return a PIL RGB image.
+
+    Shared by ALL vision backends so the exact same image reaches each engine —
+    important for fair engine A/B comparisons in `eval_ocr.py`. `max_dim=None`
+    uses `config.ollama.max_image_dim`; `max_dim=0` disables downscaling.
+    Dimension-preserving downscale keeps the raw->preprocessed mapping intact.
+    """
+    config = config or get_config()
+    image_bytes = preprocess(image_bytes, config)
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    if max_dim is None:
+        max_dim = config.ollama.max_image_dim
+    if max_dim and max_dim > 0 and max(im.size) > max_dim:
+        im.thumbnail((max_dim, max_dim))
+    return im
+
+
 def preprocess(image_bytes: bytes, config: Config | None = None) -> bytes:
     """Apply the configured preprocessing pipeline to a page image.
 
@@ -146,11 +178,23 @@ def preprocess(image_bytes: bytes, config: Config | None = None) -> bytes:
             bgr = _light_contrast(bgr)
             return _bgr_to_png(bgr)
 
+        if mode == "sharpen":
+            # Mild unsharp mask only (VLM-friendly; dimension-preserving).
+            bgr = _sharpen(bgr)
+            return _bgr_to_png(bgr)
+
         # "full" mode (or legacy per-flag enablement).
         if pp.deskew:
             bgr, angle = _deskew(bgr)
             if angle:
                 logger.debug("Deskewed page by %.2f degrees", angle)
+        if pp.sharpen:
+            bgr = _sharpen(bgr)
+        # VLM-safe: binarization/denoise/CLAHE degrade vision-LLM Arabic OCR
+        # (arXiv 2608.22366), so skip them even when "full" is requested.
+        if pp.vlm_safe:
+            logger.debug("PREPROCESS_VLM_SAFE on: skipping binarize/denoise/contrast for the VLM path")
+            return _bgr_to_png(bgr)
         if pp.binarize:
             bgr = _adaptive_binarize(bgr)
         if pp.denoise:
@@ -192,6 +236,57 @@ def enhance_contrast(image_bytes: bytes) -> bytes:
     except Exception as exc:
         logger.warning("Contrast enhancement failed, using original image: %s", exc)
         return image_bytes
+
+
+def sharpen_image(image_bytes: bytes) -> bytes:
+    """Mild unsharp mask for retrying pages the vision model found hard to read.
+
+    Preferred over `enhance_contrast` for vision LLMs (arXiv 2608.22366 shows
+    sharpening helps while contrast enhancement can hurt). Dimension-preserving.
+    Returns the original bytes if OpenCV is unavailable or the step fails.
+    """
+    if not _HAS_CV2:
+        return image_bytes
+    try:
+        bgr = _pil_to_bgr(image_bytes)
+        return _bgr_to_png(_sharpen(bgr))
+    except Exception as exc:
+        logger.warning("Sharpening failed, using original image: %s", exc)
+        return image_bytes
+
+
+def score_diacritic_density(image_bytes: bytes) -> float:
+    """Estimate how diacritic / small-mark heavy a page is (0.0-1.0).
+
+    Arabic tashkeel and small marks render as many tiny connected components.
+    Returns the fraction of text components that are small (a cheap proxy for
+    "render this page at a higher DPI so the marks survive downscaling").
+    Thresholds assume a ~300 DPI render. Fail-soft: returns 0.0 when OpenCV is
+    unavailable or analysis fails.
+    """
+    if not _HAS_CV2:
+        return 0.0
+    try:
+        bgr = _pil_to_bgr(image_bytes)
+        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        num, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        h_page, w_page = gray.shape
+        total = 0
+        small = 0
+        for i in range(1, num):
+            _x, _y, w, h, area = stats[i]
+            if area < 4:  # ignore noise specks
+                continue
+            if w > w_page * 0.9 and h > h_page * 0.9:  # border/artifact
+                continue
+            total += 1
+            if area <= 60 and h <= 14:  # tiny mark (likely a diacritic)
+                small += 1
+        return small / total if total else 0.0
+    except Exception as exc:
+        logger.warning("Diacritic-density estimate failed: %s", exc)
+        return 0.0
 
 
 def detect_word_boxes(image_bytes: bytes) -> list[tuple[int, int, int, int]]:

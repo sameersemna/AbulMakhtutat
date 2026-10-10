@@ -35,6 +35,7 @@ logger = logging.getLogger("main")
 @click.option("--correct", is_flag=True, help="Enable post-OCR correction pass (fixes OCR artifacts with a text model).")
 @click.option("--preprocess", "preprocess_mode", flag_value="full", default="off", help="Enable full OpenCV preprocessing (deskew, binarize, denoise, contrast).")
 @click.option("--preprocess-light", "preprocess_mode", flag_value="light", help="Enable light preprocessing (global contrast normalization only).")
+@click.option("--preprocess-sharpen", "preprocess_mode", flag_value="sharpen", help="Enable mild unsharp-mask preprocessing (VLM-friendly).")
 @click.option("--overlay", "overlay_mode", flag_value="page", default="off", help="Generate a searchable overlay PDF (original scan + invisible OCR text layer).")
 @click.option("--overlay-bbox", "overlay_mode", flag_value="bbox", help="Generate overlay PDF with model-precise bounding-box alignment (most accurate).")
 @click.option("--overlay-line", "overlay_mode", flag_value="line", help="Generate overlay PDF with line-level alignment (robust for Arabic).")
@@ -56,7 +57,7 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
         config.pipeline.overlay_mode = overlay_mode
     if correct:
         config.ollama.postprocess_enabled = True
-    if preprocess_mode in ("light", "full"):
+    if preprocess_mode in ("light", "full", "sharpen"):
         config.pipeline.preprocess.mode = preprocess_mode
         config.pipeline.preprocess.enabled = True
     config.ensure_dirs()

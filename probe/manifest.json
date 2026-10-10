@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "description": "Arabic OCR probe set for eval_ocr.py. Pages 31-35 of the canonical test book, plus room to add diacritized/footnote-heavy pages. Ground truth files are seeded by `python eval_ocr.py --export-templates` and then corrected by hand.",
+  "entries": [
+    {
+      "id": "1-p31",
+      "pdf": "input/rabee/majmua/1.pdf",
+      "page": 31,
+      "ground_truth": "probe/ground_truth/1_p0031.txt"
+    },
+    {
+      "id": "1-p32",
+      "pdf": "input/rabee/majmua/1.pdf",
+      "page": 32,
+      "ground_truth": "probe/ground_truth/1_p0032.txt"
+    },
+    {
+      "id": "1-p33",
+      "pdf": "input/rabee/majmua/1.pdf",
+      "page": 33,
+      "ground_truth": "probe/ground_truth/1_p0033.txt"
+    },
+    {
+      "id": "1-p34",
+      "pdf": "input/rabee/majmua/1.pdf",
+      "page": 34,
+      "ground_truth": "probe/ground_truth/1_p0034.txt"
+    },
+    {
+      "id": "1-p35",
+      "pdf": "input/rabee/majmua/1.pdf",
+      "page": 35,
+      "ground_truth": "probe/ground_truth/1_p0035.txt"
+    }
+  ]
+}

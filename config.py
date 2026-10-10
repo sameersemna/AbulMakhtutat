@@ -92,6 +92,10 @@ class OllamaConfig:
     backoff_base: float = _env_float("OLLAMA_BACKOFF_BASE", 2.0)
     temperature: float = _env_float("OLLAMA_TEMPERATURE", 0.0)
     num_ctx: int = _env_int("OLLAMA_NUM_CTX", 8192)
+    # Image transform used when the model refuses a page (unreadable/overexposed):
+    # "contrast" (default) | "sharpen" | "both". Sharpening is preferred for
+    # vision LLMs (arXiv 2608.22366); "both" tries contrast then sharpening.
+    retry_mode: str = os.getenv("OLLAMA_RETRY_MODE", "contrast")
     # Keep models resident in GPU memory (default Ollama keep-alive) so we don't
     # waste time reloading. Inference calls are serialized via a queue instead.
     keep_alive: str = os.getenv("OLLAMA_KEEP_ALIVE", "5m")
@@ -100,6 +104,31 @@ class OllamaConfig:
     queue_inference: bool = _env_bool("OLLAMA_QUEUE_INFERENCE", True)
     # Downscale page images to this max long-edge dimension before sending.
     max_image_dim: int = _env_int("OLLAMA_MAX_IMAGE_DIM", 1500)
+    # Larger cap used for heuristic-flagged "heavy" (diacritized / small-text)
+    # pages so diacritics survive downscaling. See PipelineConfig.heavy_heuristic.
+    max_image_dim_heavy: int = _env_int("OLLAMA_MAX_IMAGE_DIM_HEAVY", 2500)
+
+
+@dataclass
+class VisionConfig:
+    """Vision OCR backend selection.
+
+    `backend` chooses the engine: "ollama" (default, the local Ollama server) or
+    "hf" (a HuggingFace vision-language model loaded in-process). The HF path is
+    opt-in and fail-soft: if the required packages/model are unavailable, the
+    engine factory falls back to Ollama so the pipeline still runs.
+    """
+
+    backend: str = os.getenv("VISION_BACKEND", "ollama").strip().lower()  # "ollama" | "hf"
+    # Arabic-fine-tuned VLM candidate. Options include:
+    #   NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct   (2B Qwen2-VL, CER 0.061)
+    #   NAMAA-Space/Qari-OCR-v0.3-VL-2B-Instruct   (2B, layout-aware)
+    #   AhmedZaky1/DIMI-Arabic-OCR-V2              (Qwen2.5-VL-7B, CER 0.112)
+    #   QCRI/Fanar-2-Oryx-IVU                      (Qwen2.5-VL-7B, Apache-2.0)
+    hf_model: str = os.getenv("VISION_HF_MODEL", "NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct")
+    hf_device: str = os.getenv("VISION_HF_DEVICE", "cuda")
+    hf_max_new_tokens: int = _env_int("VISION_HF_MAX_NEW_TOKENS", 2048)
+    hf_load_in_4bit: bool = _env_bool("VISION_HF_LOAD_IN_4BIT", False)
 
 
 @dataclass
@@ -107,9 +136,11 @@ class PreprocessConfig:
     """OpenCV image preprocessing applied before vision OCR.
 
     `mode` selects a preset:
-      - "off"  : no preprocessing (default; vision-LLM handles clean scans).
-      - "light": cheap global contrast normalization only (fast, low-risk).
-      - "full" : deskew + binarize + denoise + contrast (heavy pipeline).
+      - "off"    : no preprocessing (default; vision-LLM handles clean scans).
+      - "light"  : cheap global contrast normalization only (fast, low-risk).
+      - "sharpen": mild unsharp mask only (VLM-friendly; arXiv 2608.22366).
+      - "full"   : deskew + binarize + denoise + contrast (heavy pipeline).
+                   Set `vlm_safe=True` to keep only deskew/sharpen on this path.
     """
 
     mode: str = os.getenv("PREPROCESS_MODE", "off")
@@ -118,6 +149,11 @@ class PreprocessConfig:
     binarize: bool = _env_bool("PREPROCESS_BINARIZE", False)
     denoise: bool = _env_bool("PREPROCESS_DENOISE", False)
     normalize_contrast: bool = _env_bool("PREPROCESS_NORMALIZE_CONTRAST", False)
+    # Mild unsharp mask (VLM-friendly). Off by default.
+    sharpen: bool = _env_bool("PREPROCESS_SHARPEN", False)
+    # When True, "full" mode skips binarize/denoise/contrast on the vision-LLM
+    # path: those operations degrade VLM Arabic OCR (arXiv 2608.22366).
+    vlm_safe: bool = _env_bool("PREPROCESS_VLM_SAFE", False)
 
 
 @dataclass
@@ -141,6 +177,13 @@ class PipelineConfig:
     dpi: int = _env_int("OCR_DPI", 300)
     workers: int = _env_int("OCR_WORKERS", 1)  # default 1 to avoid GPU overload
     max_pages: int = _env_int("OCR_MAX_PAGES", 0)  # 0 = all pages
+    # Higher-resolution path for diacritized / small-text pages (opt-in). When
+    # `heavy_heuristic` marks a page "heavy" (many tiny marks), it is re-rendered
+    # at `dpi_heavy` and the vision model's image cap is raised to
+    # `max_image_dim_heavy`. Defaults are off, so base behaviour is unchanged.
+    dpi_heavy: int = _env_int("OCR_DPI_HEAVY", 400)
+    heavy_heuristic: bool = _env_bool("OCR_HEAVY_HEURISTIC", False)
+    heavy_threshold: float = _env_float("OCR_HEAVY_THRESHOLD", 0.35)
     # Page range to process, e.g. "31-35" or "1,3,5-7". Empty = all pages.
     # Useful for focusing on the main text and skipping cover/intro pages.
     pages: str = os.getenv("OCR_PAGES", "")
@@ -156,6 +199,13 @@ class PipelineConfig:
     # RTL / typography
     rtl: bool = _env_bool("OCR_RTL", True)
     font_family: str = os.getenv("OCR_FONT_FAMILY", "'Amiri', 'Traditional Arabic', 'Scheherazade New', serif")
+    # Normalize the Arabic text copy sent to search/RAG backends
+    # (Elasticsearch/Qdrant): Unicode NFC, presentation-form/orthographic folding,
+    # digit normalization, and diacritic stripping. Opt-in (default off) so
+    # indexing behaviour does not change silently; enabling it requires a reindex.
+    # The canonical Markdown output is NEVER normalized, so diacritics and exact
+    # orthography are preserved in the books themselves.
+    normalize_search: bool = _env_bool("OCR_NORMALIZE_SEARCH", False)
     # Running header (book title) repeated on every page — stripped from output.
     running_header: str = os.getenv("OCR_RUNNING_HEADER", "")
     # Calibre ebook-convert binary (for MOBI). Empty = auto-detect via PATH.
@@ -246,6 +296,7 @@ class MySQLConfig:
 @dataclass
 class Config:
     ollama: OllamaConfig = field(default_factory=OllamaConfig)
+    vision: VisionConfig = field(default_factory=VisionConfig)
     pipeline: PipelineConfig = field(default_factory=PipelineConfig)
     redis: RedisConfig = field(default_factory=RedisConfig)
     postgres: PostgresConfig = field(default_factory=PostgresConfig)

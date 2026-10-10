@@ -33,6 +33,22 @@ the shell environment **overrides** `.env`. This caused a real bug where stale
 | `OLLAMA_KEEP_ALIVE` | `5m` | How long models stay in GPU memory |
 | `OLLAMA_QUEUE_INFERENCE` | `true` | Serialize all inference through one queue |
 | `OLLAMA_MAX_IMAGE_DIM` | `1500` | Downscale long edge before OCR |
+| `OLLAMA_MAX_IMAGE_DIM_HEAVY` | `2500` | Larger cap for heuristic-flagged "heavy" (diacritized) pages |
+| `OLLAMA_RETRY_MODE` | `contrast` | Refusal retry transform: `contrast` / `sharpen` / `both` |
+
+## Vision backend
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `VISION_BACKEND` | `ollama` | `ollama` (default) or `hf` (HuggingFace VLM, in-process) |
+| `VISION_HF_MODEL` | `NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct` | HF model id (QARI, DIMI, Fanar, …) |
+| `VISION_HF_DEVICE` | `cuda` | Device for the HF model |
+| `VISION_HF_MAX_NEW_TOKENS` | `2048` | Generation budget |
+| `VISION_HF_LOAD_IN_4BIT` | `false` | 4-bit quantization for the HF model |
+
+The HF backend is **fail-soft**: if `torch`/`transformers` or the weights are
+unavailable, the engine factory falls back to Ollama. It does not support
+word/line boxes or embeddings, so keep `OVERLAY_DETECTOR=surya`.
 
 ## Pipeline
 
@@ -41,6 +57,10 @@ the shell environment **overrides** `.env`. This caused a real bug where stale
 | `INPUT_DIR` | `./input` | Root input directory |
 | `OUTPUT_DIR` | `./output` | Root output directory |
 | `OCR_DPI` | `300` | Render DPI |
+| `OCR_DPI_HEAVY` | `400` | Re-render DPI for heuristic-flagged heavy pages |
+| `OCR_HEAVY_HEURISTIC` | `false` | Enable per-page diacritic/small-mark detection |
+| `OCR_HEAVY_THRESHOLD` | `0.35` | Small-mark fraction above which a page is "heavy" |
+| `OCR_NORMALIZE_SEARCH` | `false` | Normalize the search/RAG copy (opt-in; never the canonical `.md`; requires a reindex) |
 | `OCR_WORKERS` | `1` | Concurrency (keep low to avoid GPU overload) |
 | `OCR_MAX_PAGES` | `0` (all) | Limit pages per PDF (testing) |
 | `OCR_PAGES` | `""` | Page range, e.g. `31-35` or `1,3,5-7` |
@@ -67,12 +87,19 @@ the shell environment **overrides** `.env`. This caused a real bug where stale
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `PREPROCESS_MODE` | `off` | `off` / `light` / `full` |
+| `PREPROCESS_MODE` | `off` | `off` / `light` / `sharpen` / `full` |
 | `PREPROCESS_ENABLED` | `false` | Master switch |
 | `PREPROCESS_DESKEW` | `true` | Skew correction |
 | `PREPROCESS_BINARIZE` | `false` | Adaptive thresholding |
 | `PREPROCESS_DENOISE` | `false` | Non-local means denoising |
 | `PREPROCESS_NORMALIZE_CONTRAST` | `false` | CLAHE contrast |
+| `PREPROCESS_SHARPEN` | `false` | Mild unsharp mask (VLM-friendly) |
+| `PREPROCESS_VLM_SAFE` | `false` | Skip binarize/denoise/contrast on the VLM path |
+
+> **Evidence (arXiv 2608.22366):** for vision-LLM Arabic OCR, sharpening is the
+> one preprocessing step shown to *help*; binarization, denoising and contrast
+> enhancement *degrade* it. Prefer `PREPROCESS_MODE=sharpen` or set
+> `PREPROCESS_VLM_SAFE=true` rather than `full` when OCR-ing with the VLM.
 
 ## Thermal guard
 
