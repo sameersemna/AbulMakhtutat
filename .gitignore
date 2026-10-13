@@ -16,10 +16,17 @@ run_summary.json
 
 # Probe evaluation artifacts (ground truth under probe/ground_truth/ IS tracked)
 probe/_ocr_cache/
-probe/eval_report.json
+probe/eval_report*.json
+
+# Local training data & fine-tuned models (Task 6; never tracked)
+annotation/
+models/
 
 # OS
 .DS_Store
 input/*
 ab_test_results/
 *.prs
+firebase-debug.log
+probe/probe/ground_truth/
+annotation_nodiac/images/

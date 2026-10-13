@@ -22,8 +22,8 @@ from typing import Any
 from PIL import Image
 
 from config import Config, get_config
-from ocr_engine import _VISION_PROMPT, is_refusal_text, quality_score_text
-from preprocess import prepare_page_image
+from ocr_engine import _LINE_MAX_TOKENS, _LINE_PROMPT, _VISION_PROMPT, is_refusal_text, quality_score_text
+from preprocess import prepare_line_image, prepare_page_image
 
 logger = logging.getLogger(__name__)
 
@@ -95,26 +95,35 @@ class HFVisionEngine:
         """
         return prepare_page_image(image_bytes, self.config, max_dim)
 
-    def _generate_sync(self, image_bytes: bytes, max_dim: int | None) -> str:
-        """Blocking generation (run in a worker thread)."""
+    def _generate_sync(
+        self,
+        image_bytes: bytes,
+        max_dim: int | None,
+        prompt: str = _VISION_PROMPT,
+        max_new_tokens: int | None = None,
+        line: bool = False,
+    ) -> str:
+        """Blocking generation (run in a worker thread). `line` = single line crop."""
         import torch
 
         if self._model is None:
             self._load()
-        im = self._prepare_pil(image_bytes, max_dim)
+        im = prepare_line_image(image_bytes) if line else self._prepare_pil(image_bytes, max_dim)
         messages = [
             {
                 "role": "user",
                 "content": [
                     {"type": "image"},
-                    {"type": "text", "text": _VISION_PROMPT},
+                    {"type": "text", "text": prompt},
                 ],
             }
         ]
         text = self._processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = self._processor(text=[text], images=[im], padding=True, return_tensors="pt").to(self._device)
         with torch.no_grad():
-            generated = self._model.generate(**inputs, max_new_tokens=self.config.vision.hf_max_new_tokens)
+            generated = self._model.generate(
+                **inputs, max_new_tokens=max_new_tokens or self.config.vision.hf_max_new_tokens
+            )
         trimmed = [out[len(inp):] for inp, out in zip(inputs.input_ids, generated)]
         return self._processor.batch_decode(trimmed, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
 
@@ -153,6 +162,29 @@ class HFVisionEngine:
             logger.warning("HF model returned a refusal/empty result")
             return "", ""
         return text, self.config.vision.hf_model
+
+    async def ocr_line(self, image_bytes: bytes) -> tuple[str, str]:
+        """OCR one cropped text line (line prompt, token cap, full resolution)."""
+        if self._load_failed:
+            if self._fallback is None:
+                from ocr_engine import OCREngine
+
+                self._fallback = OCREngine(self.config)
+            return await self._fallback.ocr_line(image_bytes)
+        lock = self._get_lock()
+        call = (self._generate_sync, image_bytes, None, _LINE_PROMPT, _LINE_MAX_TOKENS, True)
+        try:
+            if lock is not None:
+                async with lock:
+                    text = await asyncio.to_thread(*call)
+            else:
+                text = await asyncio.to_thread(*call)
+        except Exception as exc:
+            logger.error("HF line OCR failed: %s", exc)
+            return "", ""
+        if is_refusal_text(text):
+            return "", ""
+        return text.strip(), self.config.vision.hf_model
 
     async def _fallback_ocr(self, image_bytes: bytes, max_dim: int | None) -> tuple[str, str]:
         """Delegate to the Ollama engine after the HF model failed to load."""

@@ -122,7 +122,59 @@ cuts GPU heat.
 **Deliverables (when unblocked):** annotated line/word dataset (≥800–1,000 lines),
 training script (Qwen2.5-VL LoRA), eval report vs baseline.
 
-**Blocked on:** human-annotated ground truth for our font + GPU training time.
+**Blocked on:** hand-annotated ground truth for our font + a training script + GPU
+training time (GPU present: GB10, CUDA OK).
+
+### Unblock checklist (all must be true)
+- [ ] `probe/ground_truth/*.txt` hand-corrected (≥30–50 pages) and a baseline normalized CER recorded.
+- [ ] Best off-the-shelf model (Task 2 A/B) still misses the target CER after Task 3–4 tuning.
+- [ ] ≥800–1,000 annotated lines of the target typeface (or an accepted synthetic set).
+- [ ] Training deps installed: `peft`/`trl`/`bitsandbytes` (LoRA) or `kraken[pdf]` (Route A).
+- [ ] A training entry point authored (task deliverable) + `eval_ocr.py` used for the before/after.
+
+### Runbook (commands)
+```bash
+# Phase 0 — baseline (needs Ollama running)
+ollama pull qwen2.5vl:7b
+.venv/bin/python eval_ocr.py --engine ollama
+.venv/bin/python eval_ocr.py --export-templates      # then hand-correct probe/ground_truth/*.txt
+.venv/bin/python eval_ocr.py --score-only
+
+# Phase 1 — live model A/B (separate caches/reports per engine!)
+.venv/bin/pip install -U accelerate qwen_vl_utils
+.venv/bin/python eval_ocr.py --engine ollama --cache-dir probe/_ocr_cache/ollama --report probe/eval_report_ollama.json --force
+.venv/bin/python eval_ocr.py --engine hf     --cache-dir probe/_ocr_cache/hf     --report probe/eval_report_hf.json --force
+
+# Phase 3a — Route A (recommended, no training script): typeface-specific Kraken model
+.venv/bin/pip install "kraken[pdf]"
+#   'path' format needs <stem>.gt.txt NEXT TO each image (empty files abort ketos):
+for f in annotation/text/*.txt; do cp "$f" "annotation/images/$(basename "${f%.txt}").gt.txt"; done
+#   DEVICE: -d/--device is a TOP-LEVEL ketos option, so it goes BEFORE the subcommand.
+#   (It is NOT accepted after `train`.) Or set CUDA_VISIBLE_DEVICES=0 instead.
+.venv/bin/ketos -d cuda:0 --precision bf16-mixed train -f path -o models/ourbook annotation/images/*.png
+#   evaluate a trained model on held-out lines (prints CER/accuracy):
+ls models/ourbook
+.venv/bin/ketos test -m models/ourbook/<model file> -f path annotation/images/*.png
+
+# Phase 3b — Route B (Task 6 as written): LoRA Qwen2.5-VL — trainer: train_lora.py
+.venv/bin/pip install -U peft         # required; bitsandbytes only if you want 4-bit
+#   cut pages into single-line crops (Surya; skips eval-manifest pages, rejects slivers/merged lines)
+.venv/bin/python make_line_crops.py --pdf input/rabee/majmua/1.pdf --pages 41-60
+#   bootstrapping labels: pre-annotate line crops, then CORRECT every .gt.txt by hand
+.venv/bin/python prefill_line_gt.py --data annotation/
+find annotation/images -name '*.gt.txt' -size +0c | wc -l   # must be > 0
+#   lists characters with < 20 instances: annotate lines containing them next
+.venv/bin/python train_lora.py --check-data --data annotation/
+.venv/bin/python train_lora.py --model Qwen/Qwen2.5-VL-3B-Instruct --data annotation/ \
+    --out models/qwen-arabic-lora --epochs 3 --accum 8
+#   optional variant for search-only output: targets without harakat (fewer classes)
+.venv/bin/python train_lora.py --strip-diacritics --data annotation/ --out models/qwen-arabic-lora-plain
+VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine hf --cache-dir probe/_ocr_cache/lora --report probe/eval_report_lora.json --force
+```
+> **Note:** `eval_ocr.py` caches per entry id, so always use a distinct
+> `--cache-dir` and `--report` per engine in an A/B. For LoRA inference, save
+> **merged** weights (`merge_and_unload`) so `from_pretrained` can load them.
+
 
 ---
 

@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 
 from config import Config, get_config
-from preprocess import enhance_contrast, prepare_page_image, sharpen_image
+from preprocess import enhance_contrast, prepare_line_image, prepare_page_image, sharpen_image
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +81,17 @@ Requirements:
 - Do NOT repeat any watermark, stamp, or library logo text more than once.
 - If a region is unreadable, skip it silently rather than guessing.
 """
+
+# Prompt for a single cropped text line (annotation prefill). The page prompt asks
+# for Markdown, which makes the model invent headings/quotes on a bare line crop.
+# Mirrored by train_lora.py so the fine-tuned model sees the same instruction.
+_LINE_PROMPT = (
+    "Transcribe the Arabic text in this line image exactly as it appears, "
+    "preserving all diacritical marks (harakat). Output only the transcribed text."
+)
+# Token cap for one line: a printed line is ~15-25 words, so anything longer is a
+# repetition loop, not text.
+_LINE_MAX_TOKENS = 256
 
 _POSTPROCESS_PROMPT = """You are an expert Arabic OCR post-corrector. The following text was extracted from a scanned Arabic document and may contain OCR errors.
 
@@ -202,6 +213,7 @@ class OCREngine:
         images: list[str] | None = None,
         *,
         format_json: bool = False,
+        num_predict: int | None = None,
     ) -> str:
         """Call Ollama /api/generate with retry + exponential backoff.
 
@@ -220,6 +232,8 @@ class OCREngine:
         }
         if images:
             payload["images"] = images
+        if num_predict:
+            payload["options"]["num_predict"] = num_predict
         if format_json:
             payload["format"] = "json"
 
@@ -306,6 +320,25 @@ class OCREngine:
         # All attempts failed — return empty so the caller marks the page as failed.
         logger.error("All OCR attempts failed for page (refusal persisted)")
         return "", ""
+
+    async def ocr_line(self, image_bytes: bytes) -> tuple[str, str]:
+        """OCR one cropped text line. Returns (text, model_used); ("", "") on failure.
+
+        Uses the line prompt and a token cap, and sends the crop at full
+        resolution on a white margin (`prepare_line_image`).
+        """
+        buf = io.BytesIO()
+        prepare_line_image(image_bytes).save(buf, format="PNG")
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        model = self.config.ollama.vision_model
+        try:
+            text = await self._generate(model, _LINE_PROMPT, images=[b64], num_predict=_LINE_MAX_TOKENS)
+        except RuntimeError as exc:
+            logger.warning("Line OCR failed: %s", exc)
+            return "", ""
+        if self._is_refusal(text):
+            return "", ""
+        return text.strip(), model
 
     async def ocr_page_with_boxes(self, image_bytes: bytes) -> list[dict]:
         """OCR a page and return text lines with bounding boxes.

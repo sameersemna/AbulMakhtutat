@@ -200,6 +200,8 @@ async def _run_ocr(
             logger.info("ocr: %s (page %s) -> %d chars via %s", entry["id"], entry["page"], len(text), model or "?")
     finally:
         await engine.close()
+    if isinstance(engine, HFVisionEngine) and getattr(engine, "_fallback", None) is not None:
+        actual_backend = "hf (fell back to ollama)"
     return actual_backend
 
 

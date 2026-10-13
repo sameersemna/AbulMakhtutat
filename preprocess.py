@@ -153,6 +153,19 @@ def prepare_page_image(
     return im
 
 
+def prepare_line_image(image_bytes: bytes, pad_x: int = 40, pad_y: int = 80) -> Image.Image:
+    """Return a line crop as RGB on a white margin, for line-level vision OCR.
+
+    No page preprocessing: binarizing an already-tight crop thins diacritics.
+    The margin matters more: on a bare ~19:1 strip Qwen2.5-VL often invents a
+    short phrase, while the same crop with whitespace around it is read in full.
+    """
+    from PIL import ImageOps
+
+    im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    return ImageOps.expand(im, border=(pad_x, pad_y), fill="white")
+
+
 def preprocess(image_bytes: bytes, config: Config | None = None) -> bytes:
     """Apply the configured preprocessing pipeline to a page image.
 
