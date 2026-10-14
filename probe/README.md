@@ -43,6 +43,17 @@ footnote-heavy pages in addition to the canonical pages 31–35.
   entries that declare `overlay_pdf` + `overlay_page`; reused from
   `measure_alignment.py`.
 
+## ⚠ Ground-truth caveat (2026-10-14)
+
+`eval_ocr.py` resolves `probe/ground_truth/<id>.txt` first and falls back to the
+git-ignored `probe/probe/ground_truth/`. The files currently found in the
+fallback location are **not hand-corrected references** (they contain
+LLM/markdown output or different documents entirely — e.g. `1_p0031.txt` is
+36k chars of repeated `#` headings), so the page-level CER/WER numbers in
+`probe/eval_report*.json` are meaningless until real ground truth is written to
+`probe/ground_truth/`. The trustworthy gate is the hand-corrected **line**
+holdout (`holdout.txt`, scored by `ab_lines.py` and `analyze_errors.py`).
+
 ## Notes
 
 - Add `probe/_ocr_cache/` and `probe/eval_report.json` to `.gitignore` if they

@@ -40,15 +40,28 @@ the shell environment **overrides** `.env`. This caused a real bug where stale
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `VISION_BACKEND` | `ollama` | `ollama` (default) or `hf` (HuggingFace VLM, in-process) |
+| `VISION_BACKEND` | `ollama` | `ollama` (default), `hf` (HuggingFace VLM, in-process) or `kraken` (in-repo recognition model) |
 | `VISION_HF_MODEL` | `NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct` | HF model id (QARI, DIMI, Fanar, …) |
 | `VISION_HF_DEVICE` | `cuda` | Device for the HF model |
 | `VISION_HF_MAX_NEW_TOKENS` | `2048` | Generation budget |
 | `VISION_HF_LOAD_IN_4BIT` | `false` | 4-bit quantization for the HF model |
+| `VISION_KRAKEN_MODEL` | `models/run_x_3e4/best_0.9690.safetensors` | Kraken weights trained with `ketos train` |
+| `VISION_KRAKEN_DEVICE` | `auto` | Device for the Kraken model |
+| `VISION_KRAKEN_SEG_MODEL` | *(empty)* | Custom BLLA segmentation model; empty = kraken's bundled `blla.mlmodel` |
+| `VISION_KRAKEN_TEXT_DIRECTION` | `horizontal-rl` | Principal page direction for line reading order (Arabic RTL) |
+| `VISION_KRAKEN_BATCH_SIZE` | `16` | Lines per forward pass |
 
-The HF backend is **fail-soft**: if `torch`/`transformers` or the weights are
-unavailable, the engine factory falls back to Ollama. It does not support
+The HF and Kraken backends are **fail-soft**: if their packages or weights are
+unavailable, the engine factory falls back to Ollama. Neither supports
 word/line boxes or embeddings, so keep `OVERLAY_DETECTOR=surya`.
+
+The Kraken backend OCRs full pages by running kraken's BLLA line segmenter and
+then the recognition model. The segmenter output is converted to bbox lines
+because the in-repo models are trained on bbox line crops; feeding raw baseline
+polygons drops accuracy drastically (2026-10-14: 1/7 vs 7/7 target words on a
+book-9 page). For pre-cropped line images use `ocr_line` (via
+`prefill_line_gt.py` / `prioritize_lines.py`), which is the accurate path —
+96.8% character accuracy on the hand-corrected holdout.
 
 ## Pipeline
 

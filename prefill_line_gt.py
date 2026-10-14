@@ -17,6 +17,7 @@ Usage:
     .venv/bin/python prefill_line_gt.py --data annotation/
     .venv/bin/python prefill_line_gt.py --data annotation/ --force   # overwrite existing
     VISION_BACKEND=hf .venv/bin/python prefill_line_gt.py --data annotation/
+    VISION_BACKEND=kraken .venv/bin/python prefill_line_gt.py --data annotation/  # in-repo kraken model
 """
 
 from __future__ import annotations
@@ -46,7 +47,13 @@ async def run(data_dir: Path, force: bool, min_chars: int, max_chars: int) -> in
     cfg = get_config()
     cfg.pipeline.workers = 1
     engine = build_ocr_engine(cfg)
-    logger.info("engine: %s | model: %s", type(engine).__name__, cfg.vision.hf_model if cfg.vision.backend == "hf" else cfg.ollama.vision_model)
+    if cfg.vision.backend == "hf":
+        model_desc = cfg.vision.hf_model
+    elif cfg.vision.backend == "kraken":
+        model_desc = cfg.vision.kraken_model
+    else:
+        model_desc = cfg.ollama.vision_model
+    logger.info("engine: %s | model: %s", type(engine).__name__, model_desc)
 
     written = empty = skipped = synced = 0
     try:

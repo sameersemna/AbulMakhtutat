@@ -23,6 +23,7 @@ Usage:
 
     # Run a specific backend (overrides VISION_BACKEND for the run):
     .venv/bin/python eval_ocr.py --engine hf
+    .venv/bin/python eval_ocr.py --engine kraken   # in-repo kraken model (VISION_KRAKEN_MODEL)
 
     # Overlay LineMatch is computed automatically for manifest entries that
     # declare "overlay_pdf" and "overlay_page"; no flag is needed.
@@ -172,12 +173,22 @@ async def _run_ocr(
     from hf_vlm_engine import HFVisionEngine, build_ocr_engine
     from thermal import ThermalGuard
 
+    try:
+        from kraken_engine import KrakenEngine
+    except ImportError:  # kraken unavailable: --engine kraken will fail-soft via the factory
+        KrakenEngine = None  # type: ignore[assignment,misc]
+
     config = get_config()
     config.pipeline.workers = 1  # thermal safety (see 06_AGENT_GUIDE.md)
-    if engine_name in ("ollama", "hf"):
+    if engine_name in ("ollama", "hf", "kraken"):
         config.vision.backend = engine_name  # make --engine actually select the backend
     engine = build_ocr_engine(config)
-    actual_backend = "hf" if isinstance(engine, HFVisionEngine) else "ollama"
+    if KrakenEngine is not None and isinstance(engine, KrakenEngine):
+        actual_backend = "kraken"
+    elif isinstance(engine, HFVisionEngine):
+        actual_backend = "hf"
+    else:
+        actual_backend = "ollama"
     thermal = ThermalGuard(config)
     cache_dir.mkdir(parents=True, exist_ok=True)
 
@@ -202,6 +213,8 @@ async def _run_ocr(
         await engine.close()
     if isinstance(engine, HFVisionEngine) and getattr(engine, "_fallback", None) is not None:
         actual_backend = "hf (fell back to ollama)"
+    if KrakenEngine is not None and isinstance(engine, KrakenEngine) and getattr(engine, "_fallback", None) is not None:
+        actual_backend = "kraken (fell back to ollama)"
     return actual_backend
 
 
@@ -301,7 +314,7 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST, help="Probe manifest JSON.")
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE, help="Where per-entry OCR text is cached.")
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT, help="Where to write eval_report.json.")
-    parser.add_argument("--engine", choices=("ollama", "hf", "none"), default="ollama", help="OCR engine to run before scoring.")
+    parser.add_argument("--engine", choices=("ollama", "hf", "kraken", "none"), default="ollama", help="OCR engine to run before scoring.")
     parser.add_argument("--score-only", action="store_true", help="Skip OCR; score cached outputs only.")
     parser.add_argument("--force", action="store_true", help="Re-run OCR even if a cached output exists.")
     parser.add_argument("--export-templates", action="store_true", help="Write GT templates from cached OCR and exit.")
@@ -321,7 +334,7 @@ def main() -> None:
 
     # 2. Optionally run OCR to populate the cache.
     engine_used = "cached"
-    if not args.score_only and args.engine in ("ollama", "hf"):
+    if not args.score_only and args.engine in ("ollama", "hf", "kraken"):
         engine_used = asyncio.run(_run_ocr(entries, manifest_dir, cache_dir, args.force, args.engine))
 
     # 3. Score cached outputs against ground truth.

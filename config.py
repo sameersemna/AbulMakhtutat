@@ -119,16 +119,25 @@ class VisionConfig:
     engine factory falls back to Ollama so the pipeline still runs.
     """
 
-    backend: str = os.getenv("VISION_BACKEND", "ollama").strip().lower()  # "ollama" | "hf"
+    backend: str = os.getenv("VISION_BACKEND", "ollama").strip().lower()  # "ollama" | "hf" | "kraken"
     # Arabic-fine-tuned VLM candidate. Options include:
     #   NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct   (2B Qwen2-VL, CER 0.061)
     #   NAMAA-Space/Qari-OCR-v0.3-VL-2B-Instruct   (2B, layout-aware)
     #   AhmedZaky1/DIMI-Arabic-OCR-V2              (Qwen2.5-VL-7B, CER 0.112)
     #   QCRI/Fanar-2-Oryx-IVU                      (Qwen2.5-VL-7B, Apache-2.0)
-    hf_model: str = os.getenv("VISION_HF_MODEL", "NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct")
+    hf_model: str = os.getenv("VISION_HF_MODEL", "NAMA A-Space/Qari-OCR-v0.2-VL-2B-Instruct".replace(" ", ""))
     hf_device: str = os.getenv("VISION_HF_DEVICE", "cuda")
     hf_max_new_tokens: int = _env_int("VISION_HF_MAX_NEW_TOKENS", 2048)
     hf_load_in_4bit: bool = _env_bool("VISION_HF_LOAD_IN_4BIT", False)
+    # Kraken recognition model (Route A: the in-repo typeface-specific model trained
+    # with `ketos train`, e.g. models/run_x_3e4/best_0.9690.safetensors).
+    kraken_model: str = os.getenv("VISION_KRAKEN_MODEL", "models/run_x_3e4/best_0.9690.safetensors")
+    kraken_device: str = os.getenv("VISION_KRAKEN_DEVICE", "auto")
+    # Optional custom BLLA line-segmentation model; empty = kraken's bundled blla.mlmodel.
+    kraken_seg_model: str = os.getenv("VISION_KRAKEN_SEG_MODEL", "")
+    # Principal page direction for line reading order ("horizontal-rl" for Arabic).
+    kraken_text_direction: str = os.getenv("VISION_KRAKEN_TEXT_DIRECTION", "horizontal-rl")
+    kraken_batch_size: int = _env_int("VISION_KRAKEN_BATCH_SIZE", 16)
 
 
 @dataclass

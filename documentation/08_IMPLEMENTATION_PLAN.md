@@ -156,10 +156,28 @@ for f in annotation/text/*.txt; do cp "$f" "annotation/images/$(basename "${f%.t
 #   augmented batch (hang at `stage 0/N`, 0% CPU; worker stack ends in
 #   kraken/lib/dataset/augment.py `_warp` -> torchvision op). Hit 2026-10-14
 #   (14 h overnight hang); `--workers 0` validated (58/58 batches in 1:28 on GB10).
-.venv/bin/ketos -d cuda:0 --workers 0 --precision bf16-mixed train -f path -o models/ourbook annotation/images/*.png
-#   evaluate a trained model on held-out lines (prints CER/accuracy):
-ls models/ourbook
-.venv/bin/ketos test -m models/ourbook/<model file> -f path annotation/images/*.png
+#   Fixed split (924/103 lines): train.txt / holdout.txt    (regenerate: make_holdout.py)
+.venv/bin/ketos -d cuda:0 -s 42 --precision bf16-mixed --workers 0 train -f path -o models/run_x_3e4 \
+  -B 16 -N 90 -q fixed --schedule cosine --cos-max 90 --cos-min-lr 1e-5 --warmup 100 -r 3e-4 --augment \
+  -t train.txt -e holdout.txt
+#   evaluate on the fixed holdout (prints Character/Word accuracy + confusion table):
+.venv/bin/ketos -d cuda:0 --workers 0 test -m models/run_x_3e4/best_0.9690.safetensors -B 16 -f path \
+  $(cat holdout.txt)
+#   per-line error analysis -> models/run_x_3e4/error_report.json (worst lines, classes):
+.venv/bin/python analyze_errors.py
+#   honourific canonicalization: rewrite GT with ligatures expanded (train_canon/holdout_canon):
+.venv/bin/python canonicalize_gt.py --dry-run
+.venv/bin/python canonicalize_gt.py
+#   recommended retrain on the canonical dataset (add `--variant medium` for a larger model):
+.venv/bin/ketos -d cuda:0 -s 42 --precision bf16-mixed --workers 0 train -f path -o models/run_x_canon \
+  -B 16 -N 90 -q fixed --schedule cosine --cos-max 90 --cos-min-lr 1e-5 --warmup 100 -r 3e-4 --augment \
+  -t train_canon.txt -e holdout_canon.txt
+#   use the trained model as the pipeline engine (fail-soft to Ollama):
+VISION_BACKEND=kraken .venv/bin/python eval_ocr.py --engine kraken \
+    --cache-dir probe/_ocr_cache_kraken --report probe/eval_report_kraken.json
+VISION_BACKEND=kraken .venv/bin/python prefill_line_gt.py --data annotation/
+.venv/bin/python prioritize_lines.py --data annotation/ --prefill --top 400   # active-learning order
+.venv/bin/python ab_lines.py --engines kraken,ollama --manifest holdout.txt    # line-level engine A/B
 
 # Phase 3b — Route B (Task 6 as written): LoRA Qwen2.5-VL — trainer: train_lora.py
 .venv/bin/pip install -U peft         # required; bitsandbytes only if you want 4-bit
@@ -202,6 +220,36 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
 - `pdf_processor` checks the per-page cache before rendering (no wasted render/score on cached pages).
 - Removed the dead `--overlay-dir` option; added optional C-accelerated (rapidfuzz) edit distance.
 
+### Kraken Route A follow-up (2026-10-14)
+
+- **Training**: `run_x` (`-r 1e-4`, 60 ep) was undertrained — holdout char accuracy 0.7511,
+  and a training-slice test showed only 80.3% (underfit, not overfit). Retrained
+  `run_x_3e4` (`-r 3e-4`, 90 ep): best val 0.9690 char / 0.860 word
+  (`models/run_x_3e4/best_0.9690.safetensors`).
+- **Holdout evaluation** (`ketos test`, 103 lines / 6163 chars): 96.92% character /
+  86.36% word accuracy (24 insertions / 67 deletions / 99 substitutions).
+- **Per-line error analysis** (`analyze_errors.py`, logical order, kraken inference path):
+  96.84% char / 86.36% word, 43/103 lines exact. Weak classes: Arabic-Indic **digits 64.3%
+  right**, honourific ligatures 83.3%, punctuation 95.5%; worst lines are Quranic quotations
+  (`ٱ` wasla) and footnote/number lines. Top confusions: deletions of ل/ن/ب and spaces;
+  substitutions ي↔ب، ن↔ل، خ↔ع، ث↔ت، أ↔ا.
+- **Honourific canonicalization** (`canonicalize_gt.py`): 11 presentation-form ligatures
+  (ﷺ، ﷻ، ﷿، ﵀، ﵁، ﵂، ﵃، ﵄، ﵇، ﵉، ﷾) expanded to spelled-out phrases into a new dataset
+  `annotation_canon/` (102/1027 lines changed, +1434 chars) with `train_canon.txt` /
+  `holdout_canon.txt`; ornate Quran parentheses kept. Retrain pending (see next actions).
+- **Kraken engine** (`kraken_engine.py`, `VISION_BACKEND=kraken`): page path = bundled BLLA +
+  recognition with baseline→bbox conversion (see `05_CONFIGURATION.md`); line path =
+  `ocr_line` (96.8% char). `eval_ocr.py --engine kraken` and `prefill_line_gt.py` wired in.
+- **Tooling**: `ab_lines.py` (line-level engine A/B against the trustworthy holdout),
+  `prioritize_lines.py` (confidence-ranked annotation worklist + machine prefill).
+- **Line A/B result** (`ab_lines.py`, 103 holdout lines, `probe/ab_lines_report.json`):
+  Kraken CER 3.26% verbatim / 3.65% normalized, WER 13.73% / 13.42%;
+  Ollama qwen2.5vl:7b (line prompt) CER 23.54% / 6.83%, WER 41.29% / 15.21%.
+  The in-repo Kraken model wins in every mode and is ~30x faster (14 s vs ~7 min).
+- **Probe caveat**: the probe ground truth under `probe/probe/ground_truth/` is LLM/markdown
+  junk, so every page-level probe CER number (ollama/hf/kraken reports) is meaningless until
+  it is re-corrected (see `probe/README.md`).
+
 ### Verification
 
 ```bash
@@ -217,12 +265,16 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
 ```
 
 ### Recommended next actions (human-in-the-loop)
-1. **Fill the probe ground truth** (`eval_ocr.py` → `--export-templates` → hand-correct
-   `probe/ground_truth/*.txt`). Every other decision depends on this.
-2. **Run the live model A/B** for Task 2: install `qwen_vl_utils accelerate`,
-   download `NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct`, then
-   `eval_ocr.py --engine hf` vs `--engine ollama` and compare `eval_report.json`.
-3. **A/B preprocessing** on the probe set: baseline vs `--preprocess-sharpen` vs
-   `PREPROCESS_VLM_SAFE=true`.
-4. Enable `OCR_HEAVY_HEURISTIC=true` and confirm diacritized pages improve in
-   normalized CER before adopting.
+1. **Retrain on the canonical dataset** (`train_canon.txt` / `holdout_canon.txt`, Phase 3a
+   above) and compare with `models/run_x_3e4/best_0.9690.safetensors` on the same holdout
+   (`ketos test` + `analyze_errors.py`). Optional capacity step: add `--variant medium`.
+2. **Expand annotations worst-first**: run `make_line_crops.py` on new pages, then
+   `prioritize_lines.py --data annotation/ --prefill --top 400` and correct the
+   low-confidence lines first. Current weak spots: Arabic-Indic digits (64% right), Quranic
+   quotations (`ٱ` + ﴿…﴾) and footnotes — see `models/run_x_3e4/error_report.json`.
+3. **Re-correct the probe ground truth**: `eval_ocr.py --export-templates`, then hand-correct
+   `probe/ground_truth/*.txt` (the current fallback files are junk — see probe/README.md).
+   Page-level A/B decisions depend on it; line-level A/B already works via `ab_lines.py`.
+4. **Run the live VLM A/B** (Task 2) if a HF VLM is still wanted: install `qwen_vl_utils
+   accelerate`, download the model, then compare `eval_ocr.py --engine hf` vs
+   `--engine kraken` vs `--engine ollama` with distinct cache dirs/reports.

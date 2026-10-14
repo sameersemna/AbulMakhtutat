@@ -15,11 +15,14 @@ output/
 run_summary.json
 
 # Probe evaluation artifacts (ground truth under probe/ground_truth/ IS tracked)
-probe/_ocr_cache/
+probe/_ocr_cache*/
 probe/eval_report*.json
+probe/ab_lines_report.json
 
 # Local training data & fine-tuned models (Task 6; never tracked)
 annotation/
+annotation_nodiac/
+annotation_canon/
 models/
 
 # OS
