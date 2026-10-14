@@ -151,7 +151,12 @@ ollama pull qwen2.5vl:7b
 for f in annotation/text/*.txt; do cp "$f" "annotation/images/$(basename "${f%.txt}").gt.txt"; done
 #   DEVICE: -d/--device is a TOP-LEVEL ketos option, so it goes BEFORE the subcommand.
 #   (It is NOT accepted after `train`.) Or set CUDA_VISIBLE_DEVICES=0 instead.
-.venv/bin/ketos -d cuda:0 --precision bf16-mixed train -f path -o models/ourbook annotation/images/*.png
+#   WORKERS: --workers is ALSO top-level. Use `--workers 0`: with the default
+#   (--workers 1), the forked dataloader worker can deadlock on the first
+#   augmented batch (hang at `stage 0/N`, 0% CPU; worker stack ends in
+#   kraken/lib/dataset/augment.py `_warp` -> torchvision op). Hit 2026-10-14
+#   (14 h overnight hang); `--workers 0` validated (58/58 batches in 1:28 on GB10).
+.venv/bin/ketos -d cuda:0 --workers 0 --precision bf16-mixed train -f path -o models/ourbook annotation/images/*.png
 #   evaluate a trained model on held-out lines (prints CER/accuracy):
 ls models/ourbook
 .venv/bin/ketos test -m models/ourbook/<model file> -f path annotation/images/*.png
