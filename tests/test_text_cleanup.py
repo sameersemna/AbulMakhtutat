@@ -14,7 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from text_cleanup import (  # noqa: E402
+    HONOURIFIC_LIGATURES,
     cleanup_text,
+    expand_honourifics,
     normalize_arabic,
     strip_page_numbers,
 )
@@ -80,6 +82,40 @@ class TestNormalizeArabic(unittest.TestCase):
     def test_idempotent(self) -> None:
         once = normalize_arabic("أَلَا إِنَّ ١٢٣")
         self.assertEqual(normalize_arabic(once), once)
+
+
+class TestHonourificLigatures(unittest.TestCase):
+    def test_ligature_expanded_to_phrase(self) -> None:
+        # A non-NFKC honourific ligature (corpus mapping; see HONOURIFIC_LIGATURES).
+        self.assertEqual(normalize_arabic("\uFD42"), "رضي الله عنها")
+
+    def test_nfkc_only_ligature_expanded(self) -> None:
+        # U+FDFA is decomposed by NFKC too; the result must be the phrase,
+        # with the letter map applied (ى -> ي).
+        self.assertEqual(normalize_arabic("\uFDFA"), "صلي الله عليه وسلم")
+
+    def test_ligature_inside_sentence(self) -> None:
+        self.assertEqual(normalize_arabic("قال \uFDFA ثم"), "قال صلي الله عليه وسلم ثم")
+
+    def test_ornate_parentheses_kept(self) -> None:
+        self.assertEqual(normalize_arabic("﴿نص﴾"), "﴿نص﴾")
+
+    def test_expand_honourifics_idempotent(self) -> None:
+        once = expand_honourifics("\uFD43")
+        self.assertEqual(expand_honourifics(once), once)
+        self.assertEqual(once, "رضي الله عنهم")
+
+    def test_expand_honourifics_no_ligatures(self) -> None:
+        self.assertEqual(expand_honourifics("نص عادي"), "نص عادي")
+
+    def test_flag_disables_expansion(self) -> None:
+        # Without expansion, a non-NFKC ligature survives as its presentation form.
+        self.assertEqual(normalize_arabic("\uFD42", expand_ligatures=False), "\uFD42")
+
+    def test_all_mapped_ligatures_expanded(self) -> None:
+        for ch, phrase in HONOURIFIC_LIGATURES.items():
+            self.assertEqual(expand_honourifics(ch), phrase)
+            self.assertNotIn(ch, normalize_arabic(ch))
 
 
 if __name__ == "__main__":

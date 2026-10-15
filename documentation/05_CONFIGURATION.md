@@ -40,12 +40,12 @@ the shell environment **overrides** `.env`. This caused a real bug where stale
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `VISION_BACKEND` | `ollama` | `ollama` (default), `hf` (HuggingFace VLM, in-process) or `kraken` (in-repo recognition model) |
+| `VISION_BACKEND` | `kraken` | `kraken` (default; in-repo recognition model — best accuracy and fastest), `ollama` (local VLM server) or `hf` (HuggingFace VLM, in-process) |
 | `VISION_HF_MODEL` | `NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct` | HF model id (QARI, DIMI, Fanar, …) |
 | `VISION_HF_DEVICE` | `cuda` | Device for the HF model |
 | `VISION_HF_MAX_NEW_TOKENS` | `2048` | Generation budget |
 | `VISION_HF_LOAD_IN_4BIT` | `false` | 4-bit quantization for the HF model |
-| `VISION_KRAKEN_MODEL` | `models/run_x_3e4/best_0.9690.safetensors` | Kraken weights trained with `ketos train` |
+| `VISION_KRAKEN_MODEL` | `models/run_ppocrv6_m/best_0.9948.safetensors` | Kraken weights trained with `ketos train` (PP-OCRv6-medium, 99.40% char / 96.83% word on the holdout; `models/run_x_3e4/best_0.9690.safetensors` = earlier VGSL model) |
 | `VISION_KRAKEN_DEVICE` | `auto` | Device for the Kraken model |
 | `VISION_KRAKEN_SEG_MODEL` | *(empty)* | Custom BLLA segmentation model; empty = kraken's bundled `blla.mlmodel` |
 | `VISION_KRAKEN_TEXT_DIRECTION` | `horizontal-rl` | Principal page direction for line reading order (Arabic RTL) |
@@ -73,7 +73,7 @@ book-9 page). For pre-cropped line images use `ocr_line` (via
 | `OCR_DPI_HEAVY` | `400` | Re-render DPI for heuristic-flagged heavy pages |
 | `OCR_HEAVY_HEURISTIC` | `false` | Enable per-page diacritic/small-mark detection |
 | `OCR_HEAVY_THRESHOLD` | `0.35` | Small-mark fraction above which a page is "heavy" |
-| `OCR_NORMALIZE_SEARCH` | `false` | Normalize the search/RAG copy (opt-in; never the canonical `.md`; requires a reindex) |
+| `OCR_NORMALIZE_SEARCH` | `false` | Normalize the search/RAG copy (opt-in; never the canonical `.md`; requires a reindex). Normalization expands the 11 honourific ligatures (ﷺ → صلى الله عليه وسلم) so ligature glyphs and spelled-out text match in search |
 | `OCR_WORKERS` | `1` | Concurrency (keep low to avoid GPU overload) |
 | `OCR_MAX_PAGES` | `0` (all) | Limit pages per PDF (testing) |
 | `OCR_PAGES` | `""` | Page range, e.g. `31-35` or `1,3,5-7` |

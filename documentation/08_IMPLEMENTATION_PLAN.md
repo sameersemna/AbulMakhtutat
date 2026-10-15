@@ -165,13 +165,28 @@ for f in annotation/text/*.txt; do cp "$f" "annotation/images/$(basename "${f%.t
   $(cat holdout.txt)
 #   per-line error analysis -> models/run_x_3e4/error_report.json (worst lines, classes):
 .venv/bin/python analyze_errors.py
-#   honourific canonicalization: rewrite GT with ligatures expanded (train_canon/holdout_canon):
-.venv/bin/python canonicalize_gt.py --dry-run
-.venv/bin/python canonicalize_gt.py
-#   recommended retrain on the canonical dataset (add `--variant medium` for a larger model):
-.venv/bin/ketos -d cuda:0 -s 42 --precision bf16-mixed --workers 0 train -f path -o models/run_x_canon \
+#   honourific ligatures: the SHIPPED model keeps them in GT (annotation_nodiac
+#   convention) and expands them AFTER recognition on the search path
+#   (text_cleanup.normalize_arabic -> HONOURIFIC_LIGATURES). Training canonical
+#   directly is worse (run_x_canon 94.67% vs 96.92% char, 2026-10-14) because the
+#   spelled-out phrases are too sparse; that build remains available via
+#   canonicalize_gt.py (default mode) for search-side-only datasets.
+#   expand the corpus: cut crops -> rank/prefill -> HAND-CORRECT worst-first, then rebuild:
+.venv/bin/python make_line_crops.py --pdf input/rabee/majmua/1.pdf --pages 61-80
+.venv/bin/python prioritize_lines.py --data annotation/ --prefill --top 400
+#   ... correct annotation/images/*.gt.txt by hand first (MACHINE labels are not training data) ...
+#   fold hand-corrected lines into the shipped dataset + manifests (idempotent;
+#   rebuilds annotation_nodiac in place, holdout stays frozen, new lines -> train):
+.venv/bin/python canonicalize_gt.py --src annotation --strip-diacritics \
+    --no-expand-ligatures --dst annotation_nodiac \
+    --train train.txt --holdout holdout.txt \
+    --train-out train.txt --holdout-out holdout.txt --append-new
+#   (verified: the rebuild reproduces the 1027 original annotation_nodiac GT files
+#    byte-identically; append-new is idempotent and warns until lines are corrected)
+#   retrain on the expanded dataset (same recipe as run_x_3e4):
+.venv/bin/ketos -d cuda:0 -s 42 --precision bf16-mixed --workers 0 train -f path -o models/run_x_v2 \
   -B 16 -N 90 -q fixed --schedule cosine --cos-max 90 --cos-min-lr 1e-5 --warmup 100 -r 3e-4 --augment \
-  -t train_canon.txt -e holdout_canon.txt
+  -t train.txt -e holdout.txt
 #   use the trained model as the pipeline engine (fail-soft to Ollama):
 VISION_BACKEND=kraken .venv/bin/python eval_ocr.py --engine kraken \
     --cache-dir probe/_ocr_cache_kraken --report probe/eval_report_kraken.json
@@ -209,7 +224,7 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
 | 2 | QARI/HF candidate + A/B | **PARTIAL** | `hf_vlm_engine.py` (`HFVisionEngine` + `build_ocr_engine`), `VisionConfig`, `eval_ocr.py --engine hf`, `ab_test.py` uses factory | Code path + fail-soft fallback verified. **Live A/B BLOCKED:** needs model download (~4 GB) + GPU time + `qwen_vl_utils`/`accelerate` (missing). |
 | 3 | Diacritized resolution | **DONE** | `preprocess.score_diacritic_density`, `OCR_DPI_HEAVY`/`OCR_HEAVY_*`/`OLLAMA_MAX_IMAGE_DIM_HEAVY`, per-page switch in `pdf_processor._process_one` | Off by default; base behaviour unchanged. Heuristic + per-call `max_dim` verified. |
 | 4 | VLM-path preprocessing | **DONE** | `preprocess._sharpen`/`sharpen_image`, `PREPROCESS_MODE=sharpen`, `PREPROCESS_VLM_SAFE`, `--preprocess-sharpen`, `OLLAMA_RETRY_MODE`, `ab_test.py --mode` | Defaults unchanged; sharpen & vlm-safe paths + dimension preservation verified. |
-| 5 | Text normalization | **DONE** | `text_cleanup.normalize_arabic`; wired into ES/Qdrant search copies; `OCR_NORMALIZE_SEARCH`; `tests/` | Canonical `.md` output never normalized. 26 unit tests pass. |
+| 5 | Text normalization | **DONE** | `text_cleanup.normalize_arabic` (+ `expand_honourifics`, `HONOURIFIC_LIGATURES`, shared with `canonicalize_gt.py`); wired into ES/Qdrant search copies; `OCR_NORMALIZE_SEARCH`; `tests/` | Canonical `.md` output never normalized. Honourific ligatures (ﷺ …) expanded to phrases by default on the search path (2026-10-15). 53 unit tests pass. |
 | 6 | LoRA fine-tuning | **DEFERRED** | — | Needs annotated ground truth + GPU training. |
 
 ### Post-review fixes (applied)
@@ -236,7 +251,24 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
 - **Honourific canonicalization** (`canonicalize_gt.py`): 11 presentation-form ligatures
   (ﷺ، ﷻ، ﷿، ﵀، ﵁، ﵂، ﵃، ﵄، ﵇، ﵉، ﷾) expanded to spelled-out phrases into a new dataset
   `annotation_canon/` (102/1027 lines changed, +1434 chars) with `train_canon.txt` /
-  `holdout_canon.txt`; ornate Quran parentheses kept. Retrain pending (see next actions).
+   `holdout_canon.txt`; ornate Quran parentheses kept. Canonical retrain ran 2026-10-14
+   (`models/run_x_canon`, alphabet 68 classes, `alphabet mismatch` warning gone).
+- **Canonical retrain result** (finished 2026-10-14 ~17:52 local, 90 ep, `--workers 0`):
+  best `models/run_x_canon/best_0.9470.safetensors` (val 0.9470 char, reached at epoch 75; no
+  later improvement). `ketos test` on `holdout_canon.txt` (103 lines / **6453** chars):
+  **94.67% character / 80.78% word** accuracy (23 ins / 200 del / 121 sub; 34/103 lines exact
+  vs 43/103) — *worse* than
+  `run_x_3e4` (96.92% / 86.36%, 6163 chars). The regression is the canonicalization itself,
+  not Arabic recognition: canonicalization adds exactly **+290 chars** to the holdout, all in
+  spelled-out honourifics (`صلى الله عليه وسلم` x13, `عليه الصلاة والسلام` x3, `عز وجل` x3,
+  `رضي الله عنه` x2, `جل جلاله` x2, `رحمه الله` x1); the holdout error count rises by +154
+  (190→344), and **all 10 worst lines** contain those phrases, which the model mangles/drops
+  (e.g. `صلى الله عليه وسلم` → `صد ليه ولم`). The `ﷺ`-type ligatures occurred in only
+  ~102/1027 training lines — too sparse for a 4 M-param CTC model to learn the long expanded
+  form; digits stay weak (59.5% vs 64.3%). Verified the expansion itself is clean
+  (byte-identical rebuild). **Implication:** keep canonical GT as the correct/searchable target,
+  but the model must see the expanded phrases far more often (oversample the honourific lines),
+  or apply the ligature→phrase mapping *after* recognition instead of training on it.
 - **Kraken engine** (`kraken_engine.py`, `VISION_BACKEND=kraken`): page path = bundled BLLA +
   recognition with baseline→bbox conversion (see `05_CONFIGURATION.md`); line path =
   `ocr_line` (96.8% char). `eval_ocr.py --engine kraken` and `prefill_line_gt.py` wired in.
@@ -246,14 +278,58 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
   Kraken CER 3.26% verbatim / 3.65% normalized, WER 13.73% / 13.42%;
   Ollama qwen2.5vl:7b (line prompt) CER 23.54% / 6.83%, WER 41.29% / 15.21%.
   The in-repo Kraken model wins in every mode and is ~30x faster (14 s vs ~7 min).
+- **Annotation batch (2026-10-14)**: 468 line crops cut from book 1 pages 61-80; ranked with the
+  trained model into `annotation/worklist.tsv` and machine-prefilled worst-first (384 lines) for
+  hand correction. Once corrected, fold the lines into the shipped dataset with the
+  ligature-preserving rebuild + `--append-new` (runbook Phase 3a above):
+  the rebuild was verified byte-identical on the 1027 original `annotation_nodiac` GT files, the
+  holdout stays frozen, appending is idempotent, and the tool warns that appended lines must be
+  human-corrected. Until corrected, the prefills stay out of training (they are not in either
+  manifest).
+- **Harness guard**: `eval_ocr.py` now flags machine-generated ground truth (`gt_warning` in the
+  report plus a log warning) so the probe set cannot silently score against LLM/markdown junk.
 - **Probe caveat**: the probe ground truth under `probe/probe/ground_truth/` is LLM/markdown
   junk, so every page-level probe CER number (ollama/hf/kraken reports) is meaningless until
   it is re-corrected (see `probe/README.md`).
 
+### Deployment + follow-ups (2026-10-15)
+
+- **Kraken is the default backend** (`config.py`): `VISION_BACKEND=kraken` →
+  `models/run_x_3e4/best_0.9690.safetensors`; verified the factory returns `KrakenEngine`,
+  falls back to Ollama with a warning when the weights are missing, and `ollama`/`hf`
+  overrides still work.
+- **Search-side ligature expansion**: `text_cleanup.normalize_arabic` now expands the 11
+  honourific presentation-form ligatures to phrases *before* NFKC (NFKC decomposes only
+  U+FDFA/FDFB). The map lives in `text_cleanup.HONOURIFIC_LIGATURES` and
+  `canonicalize_gt.py` now imports it (single source of truth, no drift). Raw `.md`/`.txt`
+  output keeps the typographic ligature; only normalized/search copies expand. New tests
+  cover expansion, idempotency, the disable flag and ornate parens.
+- **Dataset builder** (`canonicalize_gt.py`) generalized for fold-in:
+  `--no-expand-ligatures` (ligature-preserving build), `--train-out`/`--holdout-out`,
+  and `--append-new` (adds dataset files missing from both manifests to the *training*
+  manifest; holdout stays frozen; idempotent; warns that appended GT must be
+  hand-corrected). Verified: the rebuild reproduces all 1027 original `annotation_nodiac`
+  GT files byte-identically; append-new adds 384 and is a no-op on re-run.
+- **Capacity probe — DONE, decisive win (2026-10-15)**: `--arch ppocrv6 --variant medium`
+  (32.9 M params: 15.6 M backbone + 17.3 M NRTR attention decoder), same split/recipe,
+  90 epochs ≈ 3.5 h (`models/run_ppocrv6_m`). Independent `ketos test` on
+  `best_0.9948.safetensors` (103 lines / 6163 chars): **99.40% character / 96.83% word**
+  (5 ins / 15 del / 17 sub) vs `run_x_3e4`'s 96.92% / 86.36% (24/67/99) — **+2.5 char /
+  +10.5 word points, ~5x fewer errors**. `analyze_errors.py`: 99.16% char / 95.69% word,
+  **76/103 lines exact** (vs 43/103); per-category: Arabic letters 99.54%, spaces 99.32%,
+  punctuation 97.77%, digits 85.7% (was 64.3%), honourifics 94.4%, ornate parens 100%.
+  Training-time val (0.9948) matches the independent test, so the NRTR path is not
+  optimistic. Verified through our own `KrakenEngine.ocr_line` too (loads + decodes; keeps
+  the ligature classes, expanded on the search path by `normalize_arabic`).
+  **Decision: the shipped default is now `models/run_ppocrv6_m/best_0.9948.safetensors`**
+  (`VISION_KRAKEN_MODEL`), and `run_x_v2` after the annotation fold-in should retrain
+  PP-OCRv6-medium, not VGSL. Checkpoints pruned; remaining errors are page-number lines,
+  Quranic quotes (`ٱ`/`﴿﴾`) and letter-spacing joins.
+
 ### Verification
 
 ```bash
-# Unit tests (26 passing)
+# Unit tests (43 passing)
 .venv/bin/python -m unittest discover -s tests -t . -v
 
 # Probe harness (no model needed)
@@ -265,16 +341,23 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
 ```
 
 ### Recommended next actions (human-in-the-loop)
-1. **Retrain on the canonical dataset** (`train_canon.txt` / `holdout_canon.txt`, Phase 3a
-   above) and compare with `models/run_x_3e4/best_0.9690.safetensors` on the same holdout
-   (`ketos test` + `analyze_errors.py`). Optional capacity step: add `--variant medium`.
-2. **Expand annotations worst-first**: run `make_line_crops.py` on new pages, then
-   `prioritize_lines.py --data annotation/ --prefill --top 400` and correct the
-   low-confidence lines first. Current weak spots: Arabic-Indic digits (64% right), Quranic
-   quotations (`ٱ` + ﴿…﴾) and footnotes — see `models/run_x_3e4/error_report.json`.
+1. **Deploy** — DONE (2026-10-15): `VISION_BACKEND` defaults to `kraken` with
+   `VISION_KRAKEN_MODEL=models/run_ppocrv6_m/best_0.9948.safetensors` (99.40% char / 96.83%
+   word; fail-soft to Ollama), and `text_cleanup.normalize_arabic` expands the 11 honourific
+   ligatures to phrases (`HONOURIFIC_LIGATURES`, shared with `canonicalize_gt.py`) so
+   search/RAG text is canonical without retraining. The canonical *training* question is
+   settled: ship the ligature-preserving model + post-OCR expansion (canonical retrain lost
+   2.2 pts of char accuracy, see above). Raw .txt output keeps the typographic ligature.
+2. **Expand annotations worst-first** (the main accuracy lever left): hand-correct the 384
+   prefilled crops in `annotation/worklist.tsv` (worst-first; 84 crops have no prefill),
+   then fold them in with the ligature-preserving rebuild + `--append-new` (Phase 3a
+   runbook) and retrain `models/run_x_v2` with **PP-OCRv6-medium** (not VGSL — see the
+   capacity result above). Remaining weak spots of the new default model: page-number
+   lines, Quranic quotations (`ٱ`/`﴿﴾`) and letter-spacing joins — see
+   `models/run_ppocrv6_m/error_report.json`; prioritise lines that contain those.
 3. **Re-correct the probe ground truth**: `eval_ocr.py --export-templates`, then hand-correct
    `probe/ground_truth/*.txt` (the current fallback files are junk — see probe/README.md).
    Page-level A/B decisions depend on it; line-level A/B already works via `ab_lines.py`.
-4. **Run the live VLM A/B** (Task 2) if a HF VLM is still wanted: install `qwen_vl_utils
-   accelerate`, download the model, then compare `eval_ocr.py --engine hf` vs
-   `--engine kraken` vs `--engine ollama` with distinct cache dirs/reports.
+4. **Capacity A/B** — DONE (2026-10-15): PP-OCRv6-medium beat the 4 M-param VGSL model by
+   +2.5 char / +10.5 word points and is now the default (see above). No further
+   architecture search needed before the annotation fold-in.

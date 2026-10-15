@@ -113,13 +113,15 @@ class OllamaConfig:
 class VisionConfig:
     """Vision OCR backend selection.
 
-    `backend` chooses the engine: "ollama" (default, the local Ollama server) or
-    "hf" (a HuggingFace vision-language model loaded in-process). The HF path is
-    opt-in and fail-soft: if the required packages/model are unavailable, the
-    engine factory falls back to Ollama so the pipeline still runs.
+    `backend` chooses the engine: "kraken" (default; the in-repo recognition
+    model trained with `ketos train` — highest accuracy and ~30x faster than the
+    VLM paths on our corpus), "ollama" (the local Ollama server), or "hf" (a
+    HuggingFace vision-language model loaded in-process). All three are
+    fail-soft: if a backend's packages or weights are unavailable, the engine
+    factory falls back to Ollama so the pipeline still runs.
     """
 
-    backend: str = os.getenv("VISION_BACKEND", "ollama").strip().lower()  # "ollama" | "hf" | "kraken"
+    backend: str = os.getenv("VISION_BACKEND", "kraken").strip().lower()  # "ollama" | "hf" | "kraken"
     # Arabic-fine-tuned VLM candidate. Options include:
     #   NAMAA-Space/Qari-OCR-v0.2-VL-2B-Instruct   (2B Qwen2-VL, CER 0.061)
     #   NAMAA-Space/Qari-OCR-v0.3-VL-2B-Instruct   (2B, layout-aware)
@@ -130,8 +132,10 @@ class VisionConfig:
     hf_max_new_tokens: int = _env_int("VISION_HF_MAX_NEW_TOKENS", 2048)
     hf_load_in_4bit: bool = _env_bool("VISION_HF_LOAD_IN_4BIT", False)
     # Kraken recognition model (Route A: the in-repo typeface-specific model trained
-    # with `ketos train`, e.g. models/run_x_3e4/best_0.9690.safetensors).
-    kraken_model: str = os.getenv("VISION_KRAKEN_MODEL", "models/run_x_3e4/best_0.9690.safetensors")
+    # with `ketos train`). Default is the PP-OCRv6-medium run (99.40% char / 96.83%
+    # word on the 103-line holdout, 2026-10-15); the earlier VGSL model
+    # (models/run_x_3e4/best_0.9690.safetensors, 96.92% / 86.36%) is kept as fallback.
+    kraken_model: str = os.getenv("VISION_KRAKEN_MODEL", "models/run_ppocrv6_m/best_0.9948.safetensors")
     kraken_device: str = os.getenv("VISION_KRAKEN_DEVICE", "auto")
     # Optional custom BLLA line-segmentation model; empty = kraken's bundled blla.mlmodel.
     kraken_seg_model: str = os.getenv("VISION_KRAKEN_SEG_MODEL", "")

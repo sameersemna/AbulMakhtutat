@@ -5,7 +5,8 @@ Loads a kraken recognition model (the in-repo "Route A" models trained with
 `ocr_line` interface as `OCREngine` and `HFVisionEngine`, so the pipeline and
 `eval_ocr.py` can use it interchangeably.
 
-Enable with `VISION_BACKEND=kraken` and `VISION_KRAKEN_MODEL=<path>` (defaults to
+The default backend (`VISION_BACKEND=kraken`); override with `VISION_BACKEND=ollama`
+to use the Ollama VLM server, or set `VISION_KRAKEN_MODEL=<path>` (defaults to
 `models/run_x_3e4/best_0.9690.safetensors`). Full-page OCR runs kraken's bundled
 BLLA line segmenter first (overridable with `VISION_KRAKEN_SEG_MODEL`), then
 recognizes every line. `ocr_line` recognizes pre-cropped line images directly

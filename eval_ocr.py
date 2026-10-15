@@ -277,6 +277,17 @@ def _export_templates(entries: list[dict[str, Any]], manifest_dir: Path, cache_d
 # --- Main -------------------------------------------------------------------
 
 
+def _gt_looks_synthetic(text: str) -> bool:
+    """Heuristic for machine-generated ground truth (markdown/templated/oversized).
+
+    The probe set once scored against LLM/markdown output and inflated every
+    engine's error rate; warn loudly instead of silently scoring junk.
+    """
+    if "```" in text or text.lstrip().startswith("# ") or "\n# " in text:
+        return True
+    return len(text) > 20000
+
+
 def _aggregate(per_entry: list[dict[str, Any]]) -> dict[str, float]:
     """Mean metrics over scored entries (those with ground truth)."""
     keys = ("cer_verbatim", "wer_verbatim", "cer_normalized", "wer_normalized")
@@ -352,6 +363,11 @@ def main() -> None:
         else:
             ref = gt_path.read_text(encoding="utf-8")
             hyp = cache_path.read_text(encoding="utf-8")
+            if _gt_looks_synthetic(ref):
+                logger.warning(
+                    "ground truth for %s looks machine-generated (markdown/heading/oversized, %d chars) — "
+                    "metrics may be meaningless; see probe/README.md", entry["id"], len(ref))
+                record["gt_warning"] = True
             record["metrics"] = score_pair(ref, hyp)
             record["scored"] = True
 

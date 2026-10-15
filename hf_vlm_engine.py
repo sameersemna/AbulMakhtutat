@@ -233,12 +233,13 @@ class HFVisionEngine:
 def build_ocr_engine(config: Config | None = None):
     """Return the configured vision OCR engine, falling back to Ollama.
 
-    Default (`VISION_BACKEND=ollama`) returns `OCREngine`. `VISION_BACKEND=hf`
-    returns `HFVisionEngine` when the HF stack is importable; `VISION_BACKEND=kraken`
-    returns `KrakenEngine` when kraken and `VISION_KRAKEN_MODEL` are available.
-    Otherwise the factory logs a warning and falls back to Ollama so the pipeline
-    keeps working. If a heavy backend imports but its weights fail to load at
-    first use, that engine itself falls back to Ollama (see `_fallback_ocr`).
+    Default (`VISION_BACKEND=kraken`) returns `KrakenEngine` when kraken and
+    `VISION_KRAKEN_MODEL` are available. `VISION_BACKEND=hf` returns
+    `HFVisionEngine` when the HF stack is importable; `VISION_BACKEND=ollama`
+    returns `OCREngine`. If a non-Ollama backend is requested but unavailable,
+    the factory logs a warning and falls back to Ollama so the pipeline keeps
+    working. If a heavy backend imports but its weights fail to load at first
+    use, that engine itself falls back to Ollama (see `_fallback_ocr`).
     """
     from ocr_engine import OCREngine
 
