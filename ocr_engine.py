@@ -21,6 +21,12 @@ from preprocess import enhance_contrast, prepare_line_image, prepare_page_image,
 
 logger = logging.getLogger(__name__)
 
+# Model-tag prefix used by the fallback paths (kraken/HF engine -> Ollama) so
+# callers can tell a degraded fallback result from the configured engine's own
+# output. `pdf_processor` refuses to cache fallback pages (they are retried on a
+# later run instead of being silently persisted at much lower quality).
+FALLBACK_MODEL_PREFIX = "ollama-fallback:"
+
 # Phrases the vision model emits when it *refuses* to transcribe (instead of
 # returning Arabic text). These are English "I can't read this" responses that
 # must never be stored as valid OCR output.

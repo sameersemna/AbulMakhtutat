@@ -122,6 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--top", type=int, default=0, help="Prefill only the N most uncertain lines (0 = all).")
     p.add_argument("--prefill", action="store_true", help="Also write machine transcripts for the selected lines.")
     p.add_argument("--all", dest="include_annotated", action="store_true", help="Re-score annotated lines too.")
+    p.add_argument("--force", action="store_true",
+                   help="Required with `--all --prefill`: overwriting existing transcripts is destructive "
+                        "(2026-10-15: this wiped the diacritized GT of the whole corpus).")
     p.add_argument("--min-chars", type=int, default=2, help="Treat shorter output as empty (no .gt.txt written).")
     p.add_argument("--max-chars", type=int, default=300, help="Treat longer output as a repetition loop (empty).")
     return p
@@ -129,6 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.prefill and args.include_annotated and not args.force:
+        raise SystemExit(
+            "refusing to run `--all --prefill`: it overwrites the transcript of every line in the "
+            "dataset (this destroyed the diacritized GT corpus on 2026-10-15). Pass --force if you "
+            "really mean it, or drop --all to prefill only unannotated lines, optionally with --top N."
+        )
     out = args.out or (args.data / "worklist.tsv")
     return asyncio.run(run(args.data, out, args.top, args.prefill, args.include_annotated,
                            args.min_chars, args.max_chars))

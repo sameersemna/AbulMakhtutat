@@ -188,8 +188,11 @@ class FormatConverter:
         from preprocess import detect_line_boxes
 
         mode = self.config.pipeline.overlay_mode
-        if mode in ("off", "bbox"):
-            # "bbox" mode is handled separately (async, needs the engine).
+        if mode in ("off", "bbox", "line"):
+            # "bbox" and "line" overlays are built asynchronously by
+            # `write_overlay_bbox` / `write_overlay_line` in `main.py` (they need
+            # the engine); building them here as well would duplicate the work
+            # into the same output path (last writer wins).
             return None
 
         font_path = self.config.pipeline.overlay_font
@@ -321,15 +324,27 @@ class FormatConverter:
             lines.append(line)
         return "\n".join(lines)
 
-    def convert(self, result: DocumentResult, markdown: str) -> dict[str, Path | None]:
-        """Generate all output formats. Returns a map of format -> path."""
+    def convert(self, result: DocumentResult, markdown: str,
+                skip: set[str] | frozenset[str] = frozenset()) -> dict[str, Path | None]:
+        """Generate the requested output formats. Returns a map of format -> path.
+
+        Formats named in `skip` (`md`, `html`, `epub`, `pdf`, `mobi`, `overlay`)
+        are not generated at all — a skipped format never invokes its writer
+        (pandoc/weasyprint/Calibre subprocesses included).
+        """
         outputs: dict[str, Path | None] = {}
-        outputs["md"] = self._write_markdown(result, markdown)
-        outputs["html"] = self._write_html(result, markdown)
-        outputs["epub"] = self._write_epub(result, markdown)
-        outputs["pdf"] = self._write_pdf(result, markdown)
-        outputs["mobi"] = self._write_mobi(result)
-        outputs["overlay"] = self._write_overlay_pdf(result)
+        if "md" not in skip:
+            outputs["md"] = self._write_markdown(result, markdown)
+        if "html" not in skip:
+            outputs["html"] = self._write_html(result, markdown)
+        if "epub" not in skip:
+            outputs["epub"] = self._write_epub(result, markdown)
+        if "pdf" not in skip:
+            outputs["pdf"] = self._write_pdf(result, markdown)
+        if "mobi" not in skip:
+            outputs["mobi"] = self._write_mobi(result)
+        if "overlay" not in skip:
+            outputs["overlay"] = self._write_overlay_pdf(result)
         return outputs
 
     async def write_overlay_bbox(self, result: DocumentResult, engine) -> Path | None:

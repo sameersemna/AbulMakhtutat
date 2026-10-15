@@ -22,7 +22,14 @@ from typing import Any
 from PIL import Image
 
 from config import Config, get_config
-from ocr_engine import _LINE_MAX_TOKENS, _LINE_PROMPT, _VISION_PROMPT, is_refusal_text, quality_score_text
+from ocr_engine import (
+    _LINE_MAX_TOKENS,
+    _LINE_PROMPT,
+    _VISION_PROMPT,
+    FALLBACK_MODEL_PREFIX,
+    is_refusal_text,
+    quality_score_text,
+)
 from preprocess import prepare_line_image, prepare_page_image
 
 logger = logging.getLogger(__name__)
@@ -187,13 +194,18 @@ class HFVisionEngine:
         return text.strip(), self.config.vision.hf_model
 
     async def _fallback_ocr(self, image_bytes: bytes, max_dim: int | None) -> tuple[str, str]:
-        """Delegate to the Ollama engine after the HF model failed to load."""
+        """Delegate to the Ollama engine after the HF model failed to load.
+
+        The returned model tag is prefixed with `FALLBACK_MODEL_PREFIX` so the
+        pipeline can refuse to cache the (lower-quality) fallback text.
+        """
         if self._fallback is None:
             from ocr_engine import OCREngine
 
             logger.warning("HF weights unavailable; falling back to the Ollama engine for this run")
             self._fallback = OCREngine(self.config)
-        return await self._fallback.ocr_page(image_bytes, max_dim=max_dim)
+        text, model = await self._fallback.ocr_page(image_bytes, max_dim=max_dim)
+        return text, f"{FALLBACK_MODEL_PREFIX}{model}"
 
     def is_refusal(self, text: str) -> bool:
         return is_refusal_text(text)

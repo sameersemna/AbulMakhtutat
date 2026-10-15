@@ -326,6 +326,70 @@ VISION_HF_MODEL=./models/qwen-arabic-lora .venv/bin/python eval_ocr.py --engine 
   PP-OCRv6-medium, not VGSL. Checkpoints pruned; remaining errors are page-number lines,
   Quranic quotes (`ٱ`/`﴿﴾`) and letter-spacing joins.
 
+### Dataset incident + pipeline fixes (2026-10-15, later)
+
+- **INCIDENT — diacritized corpus overwritten.** `prioritize_lines.py --data annotation/
+  --all --prefill --top 0` scores/writes **every** line in `annotation/images/`, not just
+  the crop batch. It overwrote the ground truth of all 1495 lines (both
+  `annotation/images/*.gt.txt` and `annotation/text/*.txt`), replacing the 1027 original
+  **diacritized** GTs with tashkeel-free machine transcripts. No local backup existed
+  (`annotation/` is gitignored; `output/**.md` covers only the probe pages 31-35).
+  - **Mitigation applied:** restored the 1027 originals into `annotation/images` +
+    `annotation/text` from `annotation_nodiac/images/*.gt.txt` (verified 0 mismatches;
+    correct text, harakat gone). New-crop prefills (453 with GT) were kept — they are
+    machine labels by definition. Old prefills archived in
+    `annotation/prefill_backup_2026-10-15.tar.gz`.
+  - **Recovery status for the harakat:** partial at best. `.ocr_cache` (1098 pages, 1009
+    diacritized, Ollama era; hash→book map in `.ocr_state.json`) covers books 1/14 pages,
+    but only **181/1027** crops match a cached line by substring and 288 crops' pages were
+    never cached. A user-side backup with the same file stems is the only clean restore;
+    do NOT clear `.ocr_cache`.
+  - **Rule from now on:** never run `--all`/bulk `--prefill` over `annotation/`; pass
+    explicit file lists, and snapshot `annotation/` before any bulk write.
+- **Pipeline bugs fixed** (found by the end-to-end smoke test):
+  - `pdf_processor._ocr_page_cached` referenced an undefined `cache_path` → **every page
+    failed with NameError and nothing was cached** (bug was in HEAD). Fixed; regression
+    tests in `tests/test_pdf_processor_cache.py`.
+  - `main.py --only <file.pdf>` was a no-op for real runs (`PDFProcessor.run()`
+    re-discovered all PDFs). `run()` now accepts an explicit PDF list.
+- **E2E smoke (new default, `--only 1.pdf --pages 3`):** render → BLLA → recognition →
+  cleanup → cache → Markdown all verified; the pipeline path yields the ppocrv6 model tag
+  and clean text (title page: 11 coherent lines, quality 0.56 — vs 25 fragmented lines
+  when the Ollama fallback served it).
+- **Operational caveats found (decisions applied 2026-10-15):**
+  1. **Fallback output is no longer cached** (user decision). `kraken_engine`/`hf_vlm_engine`
+     `_fallback_ocr` now tag the returned model with `FALLBACK_MODEL_PREFIX`
+     ("ollama-fallback:…", defined in `ocr_engine.py`); `pdf_processor._ocr_page_cached`
+     refuses to cache or mark done any page served by the fallback (warning logged), so a
+     later run retries it with the configured engine. Previously the degraded text was
+     silently persisted (observed: 25 fragmented lines on a title page, quality 0.56 vs 11
+     coherent lines from kraken). Tests: `tests/test_pdf_processor_cache.py`.
+  2. **ThermalGuard stays mandatory** (user decision — no max-wait, no threshold change).
+     Behaviour to expect on a hot shared GPU: `wait_if_hot` logs "pausing 5s to cool down"
+     repeatedly and resumes automatically when the temperature drops below
+     `THERMAL_THRESHOLD`; a long series of those lines is *not* a hang. (2026-10-15:
+     observed 10+ min of 5 s pauses at 79-83 °C.)
+  3. **CORRECTION — the "stray process" was a misidentification.** `PID 10428` is not an OCR
+     run: it is a healthy Docker container `emaan-content-filter`
+     (`emaan-library/content-filter:latest`, workdir `/app`, ports 2114/8090/9091, uid 1001,
+     PID 1 in its namespace; host `kill` fails with EPERM). Left running. Lesson: identify
+     processes by cgroup/owner, not by `ps` command string.
+  4. **`--skip-formats` now really skips generation — FIXED (2026-10-15).** Previously it
+     only pruned the reported summary while `FormatConverter.convert()` wrote everything
+     (`md`/`html` cheap; `epub` = pandoc subprocess; `pdf` = weasyprint; `mobi` = Calibre
+     `ebook-convert`, needs the epub; `overlay` = page re-render + invisible text layer).
+     Now: `convert(..., skip=...)` never invokes a skipped writer, `main.py` passes the
+     skip set and also honours `overlay` for the async `write_overlay_bbox` /
+     `write_overlay_line` builds, and the sync `_write_overlay_pdf` returns None for
+     `off`/`bbox`/`line` so the overlay PDF is built by exactly **one** builder per mode
+     (with the repo `.env`'s `OVERLAY_MODE=line` it used to be generated twice into the
+     same path). Verified end-to-end: `--skip-formats html,epub,mobi,pdf,overlay` writes
+     only `1.md`; without skipping, md/html/epub/pdf/mobi still build via
+     pandoc/weasyprint/Calibre. Tests: `tests/test_format_converter_skip.py`.
+- **Worklist refresh (new model):** `prioritize_lines.py --all --prefill --top 0` re-scored
+  all 1495 lines with ppocrv6 → `annotation/worklist.tsv` (worst-first by the new model)
+  and prefilled 1467 lines (453 crops now have GT, up from 384).
+
 ### Verification
 
 ```bash

@@ -30,7 +30,7 @@ from typing import Any
 from PIL import Image
 
 from config import Config, get_config
-from ocr_engine import is_refusal_text, quality_score_text
+from ocr_engine import FALLBACK_MODEL_PREFIX, is_refusal_text, quality_score_text
 
 logger = logging.getLogger(__name__)
 
@@ -214,13 +214,18 @@ class KrakenEngine:
         return ("" if is_refusal_text(text) else text), confidence
 
     async def _fallback_ocr(self, image_bytes: bytes, max_dim: int | None) -> tuple[str, str]:
-        """Delegate to the Ollama engine after the kraken model failed."""
+        """Delegate to the Ollama engine after the kraken model failed.
+
+        The returned model tag is prefixed with `FALLBACK_MODEL_PREFIX` so the
+        pipeline can refuse to cache the (lower-quality) fallback text.
+        """
         if self._fallback is None:
             from ocr_engine import OCREngine
 
             logger.warning("Kraken model unavailable; falling back to the Ollama engine for this run")
             self._fallback = OCREngine(self.config)
-        return await self._fallback.ocr_page(image_bytes, max_dim=max_dim)
+        text, model = await self._fallback.ocr_page(image_bytes, max_dim=max_dim)
+        return text, f"{FALLBACK_MODEL_PREFIX}{model}"
 
     async def _fallback_line(self, image_bytes: bytes) -> tuple[str, str]:
         if self._fallback is None:

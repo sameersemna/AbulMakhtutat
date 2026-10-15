@@ -30,7 +30,7 @@ logger = logging.getLogger("main")
 @click.option("--output-dir", default="./output", type=click.Path(path_type=Path), help="Root output directory.")
 @click.option("--workers", default=1, type=int, help="Concurrent OCR workers (keep low to avoid GPU overheating).")
 @click.option("--dpi", default=300, type=int, help="Render DPI for page images.")
-@click.option("--skip-formats", default="", help="Comma-separated formats to skip (md,html,epub,mobi,pdf).")
+@click.option("--skip-formats", default="", help="Comma-separated formats to skip entirely (md,html,epub,mobi,pdf,overlay).")
 @click.option("--no-postprocess", is_flag=True, help="Disable text post-processing.")
 @click.option("--correct", is_flag=True, help="Enable post-OCR correction pass (fixes OCR artifacts with a text model).")
 @click.option("--preprocess", "preprocess_mode", flag_value="full", default="off", help="Enable full OpenCV preprocessing (deskew, binarize, denoise, contrast).")
@@ -80,7 +80,7 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
                     click.echo(str(p))
                 return
 
-            results = await processor.run()
+            results = await processor.run(pdfs)
             summary = []
             for result in results:
                 if result.status.value == "failed":
@@ -95,15 +95,14 @@ def main(input_dir: Path, output_dir: Path, workers: int, dpi: int, skip_formats
                     "Converting %s to output formats (md/html/epub/mobi/pdf) — this may take a minute for large documents...",
                     result.rel_path,
                 )
-                outputs = converter.convert(result, markdown)
-                for fmt in skip:
-                    outputs.pop(fmt, None)
+                outputs = converter.convert(result, markdown, skip=skip)
 
                 # BBox/line overlay modes use the model's grounding (async, needs engine).
-                if config.pipeline.overlay_mode == "bbox":
-                    outputs["overlay"] = await converter.write_overlay_bbox(result, processor.engine)
-                elif config.pipeline.overlay_mode == "line":
-                    outputs["overlay"] = await converter.write_overlay_line(result, processor.engine, thermal=processor.thermal)
+                if "overlay" not in skip:
+                    if config.pipeline.overlay_mode == "bbox":
+                        outputs["overlay"] = await converter.write_overlay_bbox(result, processor.engine)
+                    elif config.pipeline.overlay_mode == "line":
+                        outputs["overlay"] = await converter.write_overlay_line(result, processor.engine, thermal=processor.thermal)
 
                 # Load toc entries for DB sync.
                 toc_entries = json.loads(toc_json_path.read_text(encoding="utf-8")).get("entries", [])

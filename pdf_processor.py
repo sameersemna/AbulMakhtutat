@@ -18,6 +18,7 @@ import pymupdf
 from config import Config, get_config
 from models import DocumentResult, FileStatus, PageResult
 from hf_vlm_engine import build_ocr_engine
+from ocr_engine import FALLBACK_MODEL_PREFIX
 from state_tracker import StateTracker
 from text_cleanup import cleanup_text
 from thermal import ThermalGuard
@@ -163,10 +164,12 @@ class PDFProcessor:
             return cached
 
         start = time.monotonic()
+        is_fallback = False
         try:
             # Wait for the GPU to cool before starting this page's inference.
             await self.thermal.wait_if_hot()
             raw, model = await self.engine.ocr_page(image_bytes, max_dim=max_dim)
+            is_fallback = bool(model) and model.startswith(FALLBACK_MODEL_PREFIX)
             text = await self.engine.postprocess(raw)
             # Clean up page numbers and running headers.
             text = cleanup_text(text, self.config.pipeline.running_header)
@@ -192,10 +195,20 @@ class PDFProcessor:
         # Optional breathing room between pages to avoid sustained GPU load.
         await self.thermal.cooldown_between_pages()
 
-        if self.config.pipeline.use_cache and not result.error:
+        # Fallback pages (kraken/HF failed -> Ollama served them) are deliberately
+        # NOT cached and NOT marked done, so a later run retries them with the
+        # configured engine instead of silently persisting degraded text.
+        if is_fallback:
+            logger.warning(
+                "Page %d was served by the Ollama fallback (%s); not caching or marking it done "
+                "so a later run retries it with the configured engine",
+                page_number, model,
+            )
+        elif self.config.pipeline.use_cache and not result.error:
+            cache_path = self._cache_path(file_hash, page_number)
             cache_path.parent.mkdir(parents=True, exist_ok=True)
             cache_path.write_text(result.text, encoding="utf-8")
-        if not result.error:
+        if not result.error and not is_fallback:
             self.state.record_page(file_hash, page_number)
         return result
 
@@ -333,10 +346,11 @@ class PDFProcessor:
 
         return result
 
-    async def run(self) -> list[DocumentResult]:
-        """Process all discovered PDFs."""
-        pdfs = self.discover_pdfs()
-        logger.info("Discovered %d PDF(s) in %s", len(pdfs), self.config.pipeline.input_dir)
+    async def run(self, pdfs: list[Path] | None = None) -> list[DocumentResult]:
+        """Process the given PDFs, or all discovered ones when none are passed."""
+        if pdfs is None:
+            pdfs = self.discover_pdfs()
+            logger.info("Discovered %d PDF(s) in %s", len(pdfs), self.config.pipeline.input_dir)
         # Start the continuous temperature monitor so we can detect spikes that
         # occur *during* inference (not just before each page).
         self.thermal.start()
